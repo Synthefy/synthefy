@@ -398,7 +398,7 @@ class SynthefyAPIClient:
         #TODO @Aditya model should be literal/enum!
         model : str
             Name of the model to use for forecasting. Common models include
-            'synthefy-fm', 'sfm_moe', etc.
+            'synthefy-fm', 'sfm-moe-v1', etc.
 
         Returns
         -------
@@ -794,7 +794,7 @@ class SynthefyAsyncAPIClient:
         #TODO @Aditya model should be literal/enum!
         model : str
             Name of the model to use for forecasting. Common models include
-            'synthefy-fm', 'sfm_moe', etc.
+            'synthefy-fm', 'sfm-moe-v1', etc.
 
         Returns
         -------

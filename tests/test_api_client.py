@@ -69,7 +69,7 @@ def test_sync_forecast_raw_request(sample_forecast_data):
         timestamp_col=data["timestamp_col"],
         metadata_cols=data["metadata_cols"],
         leak_cols=data["leak_cols"],
-        model="sfm_moe",
+        model="sfm-moe-v1",
     )
 
     # Make API call
@@ -105,7 +105,7 @@ def test_sync_forecast_from_dfs(sample_forecast_data):
             timestamp_col=data["timestamp_col"],
             metadata_cols=data["metadata_cols"],
             leak_cols=data["leak_cols"],
-            model="sfm_moe",
+            model="sfm-moe-v1",
         )
 
     # Validate response
@@ -132,7 +132,7 @@ async def test_async_forecast_raw_request(sample_forecast_data):
         timestamp_col=data["timestamp_col"],
         metadata_cols=data["metadata_cols"],
         leak_cols=data["leak_cols"],
-        model="sfm_moe",
+        model="sfm-moe-v1",
     )
 
     # Make async API call
@@ -169,7 +169,7 @@ async def test_async_forecast_from_dfs(sample_forecast_data):
             timestamp_col=data["timestamp_col"],
             metadata_cols=data["metadata_cols"],
             leak_cols=data["leak_cols"],
-            model="sfm_moe",
+            model="sfm-moe-v1",
         )
 
     # Validate response
@@ -209,7 +209,7 @@ async def test_async_concurrent_forecasts(sample_forecast_data):
                 timestamp_col=data["timestamp_col"],
                 metadata_cols=data["metadata_cols"],
                 leak_cols=data["leak_cols"],
-                model="sfm_moe",
+                model="sfm-moe-v1",
             )
             forecast_tasks.append(task)
 
