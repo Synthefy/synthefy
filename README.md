@@ -200,11 +200,11 @@ from synthefy.api_client import BadRequestError, RateLimitError
 
 # Client with custom configuration
 with SynthefyAPIClient(
-    api_key="your_key",
+    api_key=None,  # Required to be None for internal endpoints
     timeout=600.0,  # 10 minutes
     max_retries=3,
     organization="your_org_id",
-    base_url="https://custom.synthefy.com"  # For enterprise customers
+    base_url="my.internal.endpoint.com"  # For enterprise customers
 ) as client:
     try:
         # Per-request configuration
@@ -240,9 +240,11 @@ The synchronous client class for interacting with the Synthefy API.
 #### Constructor Parameters
 
 - `api_key`: Your Synthefy API key (can also be set via `SYNTHEFY_API_KEY` environment variable)
+  - **Important**: When using an internal endpoint (custom `base_url`), you must set `api_key=None` or omit it entirely, otherwise an error will be thrown
 - `timeout`: Request timeout in seconds (default: 300.0 / 5 minutes)
 - `max_retries`: Number of retries for transient errors (default: 2)
 - `base_url`: API base URL (default: "https://prod.synthefy.com")
+  - For internal/enterprise endpoints, set this to your internal URL
 - `organization`: Optional organization ID for multi-tenant setups
 - `user_agent`: Custom user agent string
 
@@ -294,9 +296,25 @@ Each status error includes:
 
 ## Configuration
 
+### Internal Endpoints
+
+When using an internal Synthefy endpoint (enterprise customers), you must configure the client differently:
+
+```python
+# For internal endpoints, set api_key to None
+with SynthefyAPIClient(
+    api_key=None,  # Required for internal endpoints
+    base_url="your.internal.synthefy.endpoint.com"
+) as client:
+    # Make requests...
+    pass
+```
+
+**Important**: If you provide an API key when using an internal endpoint, the client will throw an error. Internal endpoints handle authentication differently and do not require API keys.
+
 ### Environment Variables
 
-- `SYNTHEFY_API_KEY`: Your Synthefy API key
+- `SYNTHEFY_API_KEY`: Your Synthefy API key (not used with internal endpoints)
 
 ## Support
 
