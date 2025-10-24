@@ -179,16 +179,35 @@ async def main():
     async with SynthefyAsyncAPIClient() as client:
         response = await client.forecast(request)
 
-        print(f"\nBacktesting completed with {len(response.samples)} forecast windows")
+        print(f"\nBacktesting completed with {len(response.forecasts)} forecast windows")
 
         # Process results for each window
-        for i, sample in enumerate(response.samples):
-            print(f"Window {i+1}: {len(sample.history_timestamps)} history points, "
-                f"{len(sample.target_timestamps)} target points")
+        # Note: response.forecasts contains forecast scenarios, where each scenario
+        # includes forecasts for both target columns (sales) and metadata columns
+        for i, forecast_scenario in enumerate(response.forecasts):
+            print(f"Window {i+1}: {len(forecast_scenario)} forecasts in this scenario")
+            
+            # Find the sales forecast (target column)
+            # Metadata columns (store_id, category_id, promotion_active) may have empty timestamps
+            sales_forecast = None
+            for forecast in forecast_scenario:
+                if forecast.sample_id == 'sales':
+                    sales_forecast = forecast
+                    break
+            
+            if sales_forecast:
+                print(f"  Sales forecast: {len(sales_forecast.timestamps)} timestamps, "
+                      f"{len(sales_forecast.values)} values")
+                if sales_forecast.values:
+                    print(f"  Forecast values: {sales_forecast.values[:3]}...")  # First 3 values
 
-            # Access forecast values
-            if hasattr(sample, 'forecast_values') and sample.forecast_values:
-                print(f"  Forecast values: {sample.forecast_values[:3]}...")  # First 3 values
+        # Alternative: Convert to DataFrames for easier analysis
+        result_dfs = response.to_dfs()
+        print(f"\nConverted to {len(result_dfs)} DataFrames for analysis")
+        for i, df in enumerate(result_dfs):
+            print(f"Window {i+1} DataFrame shape: {df.shape}")
+            if 'sales' in df.columns:
+                print(f"  Sales column: {df['sales'].notna().sum()} non-null values")
 asyncio.run(main())
 ```
 
