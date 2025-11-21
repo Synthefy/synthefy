@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "synthefy"
-version = "2.1.1"
+version = "2.1.2"
 description = "Python client for the Synthefy API forecasting service"
 readme = "README.md"
 license = {text = "MIT"}
