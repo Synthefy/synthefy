@@ -16,7 +16,6 @@ Based on our tested environment, here's the complete sequence that works:
 # 0. Make sure the __version__ in pyproject and __init__ is updated
 
 # 1. Navigate to synthefy directory
-cd synthefy-package/synthefy/
 
 # 2. Set up virtual environment and install dependencies
 uv sync
