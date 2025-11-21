@@ -1,8 +1,9 @@
+from enum import Enum
 from typing import Any, List, Optional, Union
 
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 # TODO - Concept of Rows/Scenarios/etc needs to be explained.
@@ -294,6 +295,9 @@ class ForecastV2Request(BaseModel):
     model : str
         Name of the model to use for forecasting. Must be a non-empty string.
         The model name is trimmed of whitespace.
+    extra_params : dict[str, Any]
+        Additional parameters to pass to the model initializer.
+        Default is an empty dictionary.
 
     Raises
     ------
@@ -1003,7 +1007,7 @@ class ForecastV2Request(BaseModel):
                 (df[timestamp_col] > cutoff_timestamp)
                 & (
                     df[timestamp_col]
-                    <= cutoff_timestamp + pd.Timedelta(forecast_window)
+                    <= cutoff_timestamp + pd.Timedelta(forecast_window)  # type: ignore
                 )
             ]
 
@@ -1030,7 +1034,7 @@ class ForecastV2Request(BaseModel):
             )
 
             # Move the cutoff timestamp forward by the stride
-            cutoff_timestamp += pd.Timedelta(stride)
+            cutoff_timestamp += pd.Timedelta(stride)  # type: ignore[operator]
 
         return windows
 
@@ -1240,6 +1244,27 @@ class ForecastV2Request(BaseModel):
         return v.strip()
 
 
+class SubscriptionInfo(BaseModel):
+    """
+    Subscription information for managing billing and API limits.
+
+    This class contains a message and URL directing users to the console
+    where they can manage their subscription, view usage, and upgrade their plan.
+
+    Parameters
+    ----------
+    message : str
+        Message to display to users about subscription limits or upgrades.
+        Example: "To manage your subscription and go beyond monthly limits, visit our console."
+    console_url : str
+        Full URL to the console/dashboard where users can manage subscriptions.
+        Example: https://console.synthefy.com/
+    """
+
+    message: str
+    console_url: str
+
+
 class ForecastV2Response(BaseModel):
     """
     A response containing forecast results for multiple samples.
@@ -1254,6 +1279,9 @@ class ForecastV2Response(BaseModel):
         List of forecast scenarios, where each scenario contains forecasts for
         multiple time series samples. Each scenario corresponds to one
         forecasting scenario from the input request.
+    subscription_info : Optional[SubscriptionInfo], default None
+        Optional subscription information with link to console for managing
+        subscription and viewing usage. Included when console URL is configured.
 
     Notes
     -----
@@ -1291,6 +1319,7 @@ class ForecastV2Response(BaseModel):
     """
 
     forecasts: List[List[SingleSampleForecastPayload]]
+    subscription_info: Optional[SubscriptionInfo] = None
 
     def to_dfs(self) -> List[pd.DataFrame]:
         """
@@ -1378,3 +1407,69 @@ class ForecastV2Response(BaseModel):
             result_dfs.append(df)
 
         return result_dfs
+
+
+class APISupportedModels(str, Enum):
+    # Use these names for legend labels
+    PROPHET = "Prophet"
+    ARIMA = "ARIMA"
+    TABPFN = "TabPFN"
+    TOTO = "ToTo"
+    MITRA = "MITRA"
+    SFM_MOE_V1 = "SFM MoE v1"
+    SFM_MOE_V2 = "SFM MoE v2"
+
+
+PLOT_COLORS = {
+    APISupportedModels.PROPHET: "#16a34a",  # Green
+    APISupportedModels.ARIMA: "#2563eb",  # Blue
+    APISupportedModels.TABPFN: "#9b59b6",  # Purple
+    APISupportedModels.TOTO: "#fbc02d",  # Yellow
+    APISupportedModels.MITRA: "#605ed1",  # Slate
+    APISupportedModels.SFM_MOE_V1: "#e74c3c",  # Vermillion
+    APISupportedModels.SFM_MOE_V2: "#fc9260",  # Synthefy Orange
+    "Chronos": "#89b23c",  # Light green
+    "TimesFM": "#1e3a8a",  # Dark blue
+}
+
+MULTIVARIATE_SUPPORT_MODELS = [
+    APISupportedModels.MITRA,
+    APISupportedModels.TABPFN,
+    APISupportedModels.TOTO,
+    APISupportedModels.MITRA,
+    APISupportedModels.ARIMA,
+    APISupportedModels.SFM_MOE_V1,
+    APISupportedModels.SFM_MOE_V2,
+]
+
+
+class ModelMetadata(BaseModel):
+    model: APISupportedModels
+    multivariate: bool = False
+
+    @model_validator(mode="after")
+    def validate_model_name(self):
+        if self.multivariate:
+            assert self.model in MULTIVARIATE_SUPPORT_MODELS, (
+                "Model is not supported for multivariate forecasting"
+            )
+        return self
+
+    @property
+    def plot_color(self) -> str:
+        return PLOT_COLORS[self.model]
+
+    @property
+    def model_name(self) -> str:
+        """TODO: To be deprecated once we use this data model in backend."""
+        name_primitive = self.model.value.lower().replace(" ", "-")
+        if self.multivariate:
+            if self.model in [
+                APISupportedModels.SFM_MOE_V1,
+                APISupportedModels.SFM_MOE_V2,
+            ]:
+                return name_primitive
+            else:
+                return f"{name_primitive}_multivariate"
+        else:
+            return f"{name_primitive}_univariate"
