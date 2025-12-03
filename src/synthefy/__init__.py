@@ -1,3 +1,3 @@
 from synthefy.api_client import SynthefyAPIClient, SynthefyAsyncAPIClient
 
-__version__ = "2.1.2"
+__version__ = "2.2.0"

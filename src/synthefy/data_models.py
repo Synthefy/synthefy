@@ -1443,9 +1443,7 @@ class ForecastV2Response(BaseModel):
                         for q_level, q_values in sorted(
                             forecast.quantiles.items()
                         ):
-                            quantile_column_name = (
-                                f"{column_name}_quantile_{q_level}"
-                            )
+                            quantile_column_name = f"{column_name}[{q_level}]"
                             quantile_values = [
                                 np.nan if val is None else val
                                 for val in q_values
