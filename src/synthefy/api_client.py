@@ -250,6 +250,7 @@ class SynthefyAPIClient:
     ) -> Dict[str, str]:
         headers: Dict[str, str] = {
             "User-Agent": self.user_agent,
+            "Content-Type": "application/json",
         }
         if self.api_key is not None:
             headers["X-API-KEY"] = self.api_key
@@ -652,6 +653,7 @@ class SynthefyAsyncAPIClient:
     ) -> Dict[str, str]:
         headers: Dict[str, str] = {
             "User-Agent": self.user_agent,
+            "Content-Type": "application/json",
         }
         if self.api_key is not None:
             headers["X-API-KEY"] = self.api_key
