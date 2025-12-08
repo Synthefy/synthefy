@@ -8,8 +8,8 @@ import pandas as pd
 
 from synthefy.data_models import ForecastV2Request, ForecastV2Response
 
-BASE_URL = "https://prod.synthefy.com"
-ENDPOINT = "/api/v2/foundation_models/forecast/stream"
+BASE_URL = "https://forecast.synthefy.com"
+ENDPOINT = "/v2/forecast"
 
 
 def _is_synthefy_domain(url: str) -> bool:
