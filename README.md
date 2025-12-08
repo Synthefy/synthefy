@@ -1,5 +1,10 @@
 # Synthefy Python Client
 
+| Branch | Status |
+|--------|--------|
+| `dev` | [![Tests](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml/badge.svg?branch=dev)](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml?query=branch%3Adev) |
+| `main` | [![Tests](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml/badge.svg?branch=main)](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml?query=branch%3Amain) |
+
 A Python client for the Synthefy API forecasting service. This package provides an easy-to-use interface for making time series forecasting requests with both synchronous and asynchronous support.
 
 ## Features
