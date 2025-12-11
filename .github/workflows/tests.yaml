@@ -31,10 +31,10 @@ jobs:
 
       - name: Run unit tests
         run: |
-          uv run pytest tests/ --ignore=tests/use_cases -v --tb=short
+          uv run pytest tests/ --ignore=tests/online_tests -v --tb=short
 
-      - name: Run use case tests
+      - name: Run online API tests
         env:
           SYNTHEFY_API_KEY: ${{ secrets.SYNTHEFY_API_KEY }}
         run: |
-          uv run pytest tests/use_cases -v --tb=short
+          uv run pytest tests/online_tests -v --tb=short

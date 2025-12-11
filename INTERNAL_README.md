@@ -115,8 +115,8 @@ uv run pytest -q --synthefy-api-target=local
 
 Notes:
 - The tests set the SDK client `base_url` to `http://localhost:${FORECASTING_API_PORT}` when using `--synthefy-api-target=local`.
-- If you prefer to run only the API integration tests, you can select them directly, e.g.:
+- If you prefer to run only the online API tests, you can select them directly, e.g.:
 
 ```bash
-uv run pytest -q tests/test_core_forecast_backtest_api.py --synthefy-api-target=local
+uv run pytest -q tests/online_tests/test_core_forecast_backtest_api.py --synthefy-api-target=local
 ```
