@@ -5,18 +5,9 @@ This test demonstrates using the Synthefy API to simulate different pricing
 scenarios and forecast their impact on sales.
 """
 
-import os
-
 import numpy as np
 import pandas as pd
 import pytest
-from synthefy.api_client import SynthefyAPIClient
-
-# Skip all tests in this module if SYNTHEFY_API_KEY is not set
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("SYNTHEFY_API_KEY"),
-    reason="SYNTHEFY_API_KEY environment variable not set",
-)
 
 
 class TestPricingSimulation:
@@ -58,18 +49,18 @@ class TestPricingSimulation:
         history_df: pd.DataFrame,
         target_dfs: list[pd.DataFrame],
         price_simulation_range: np.ndarray,
+        synthefy_client,
     ):
         """Test that pricing simulation returns forecasts for all price scenarios."""
-        with SynthefyAPIClient() as api_client:
-            results = api_client.forecast_dfs(
-                history_dfs=[history_df] * len(price_simulation_range),
-                target_dfs=target_dfs,
-                target_col="sales",
-                timestamp_col="date",
-                metadata_cols=["unit_price"],
-                leak_cols=["unit_price"],
-                model="Migas-1.0",
-            )
+        results = synthefy_client.forecast_dfs(
+            history_dfs=[history_df] * len(price_simulation_range),
+            target_dfs=target_dfs,
+            target_col="sales",
+            timestamp_col="date",
+            metadata_cols=["unit_price"],
+            leak_cols=["unit_price"],
+            model="Migas-1.0",
+        )
 
         # Verify we got results for all price scenarios
         assert len(results) == len(price_simulation_range)

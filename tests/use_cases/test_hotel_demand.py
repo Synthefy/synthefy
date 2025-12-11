@@ -5,18 +5,9 @@ This test demonstrates using the Synthefy API to forecast hotel room bookings
 with both univariate and multivariate approaches.
 """
 
-import os
-
 import numpy as np
 import pandas as pd
 import pytest
-from synthefy import SynthefyAsyncAPIClient
-
-# Skip all tests in this module if SYNTHEFY_API_KEY is not set
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("SYNTHEFY_API_KEY"),
-    reason="SYNTHEFY_API_KEY environment variable not set",
-)
 
 
 class TestHotelDemandForecasting:
@@ -104,23 +95,25 @@ class TestHotelDemandForecasting:
 
     @pytest.mark.asyncio
     async def test_univariate_forecast(
-        self, history_df: pd.DataFrame, target_period_df: pd.DataFrame
+        self,
+        history_df: pd.DataFrame,
+        target_period_df: pd.DataFrame,
+        synthefy_async_client,
     ):
         """Test univariate hotel demand forecasting (rooms only)."""
         history_forecast_df, target_df, metadata_cols, leak_cols = (
             self._prepare_univariate_data(history_df, target_period_df)
         )
 
-        async with SynthefyAsyncAPIClient() as client:
-            forecast_dfs = await client.forecast_dfs(
-                history_dfs=[history_forecast_df],
-                target_dfs=[target_df],
-                target_col="num_rooms_booked",
-                timestamp_col="timestamp",
-                metadata_cols=metadata_cols,
-                leak_cols=leak_cols,
-                model="Migas-1.0",
-            )
+        forecast_dfs = await synthefy_async_client.forecast_dfs(
+            history_dfs=[history_forecast_df],
+            target_dfs=[target_df],
+            target_col="num_rooms_booked",
+            timestamp_col="timestamp",
+            metadata_cols=metadata_cols,
+            leak_cols=leak_cols,
+            model="Migas-1.0",
+        )
 
         assert len(forecast_dfs) == 1
         forecast_df = forecast_dfs[0]
@@ -132,23 +125,25 @@ class TestHotelDemandForecasting:
 
     @pytest.mark.asyncio
     async def test_multivariate_forecast(
-        self, history_df: pd.DataFrame, target_period_df: pd.DataFrame
+        self,
+        history_df: pd.DataFrame,
+        target_period_df: pd.DataFrame,
+        synthefy_async_client,
     ):
         """Test multivariate hotel demand forecasting (with events and pricing)."""
         history_forecast_df, target_df, metadata_cols, leak_cols = (
             self._prepare_multivariate_data(history_df, target_period_df)
         )
 
-        async with SynthefyAsyncAPIClient() as client:
-            forecast_dfs = await client.forecast_dfs(
-                history_dfs=[history_forecast_df],
-                target_dfs=[target_df],
-                target_col="num_rooms_booked",
-                timestamp_col="timestamp",
-                metadata_cols=metadata_cols,
-                leak_cols=leak_cols,
-                model="chronos2",
-            )
+        forecast_dfs = await synthefy_async_client.forecast_dfs(
+            history_dfs=[history_forecast_df],
+            target_dfs=[target_df],
+            target_col="num_rooms_booked",
+            timestamp_col="timestamp",
+            metadata_cols=metadata_cols,
+            leak_cols=leak_cols,
+            model="chronos2",
+        )
 
         assert len(forecast_dfs) == 1
         forecast_df = forecast_dfs[0]
