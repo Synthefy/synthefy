@@ -329,9 +329,6 @@ class ForecastV2Request(BaseModel):
     model : str
         Name of the model to use for forecasting. Must be a non-empty string.
         The model name is trimmed of whitespace.
-    extra_params : dict[str, Any]
-        Additional parameters to pass to the model initializer.
-        Default is an empty dictionary.
 
     Raises
     ------

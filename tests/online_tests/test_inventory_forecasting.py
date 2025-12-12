@@ -5,18 +5,9 @@ This test demonstrates comparing univariate vs multivariate forecasting
 for retail inventory items using weather data as covariates.
 """
 
-import os
-
 import numpy as np
 import pandas as pd
 import pytest
-from synthefy import SynthefyAPIClient
-
-# Skip all tests in this module if SYNTHEFY_API_KEY is not set
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("SYNTHEFY_API_KEY"),
-    reason="SYNTHEFY_API_KEY environment variable not set",
-)
 
 
 class TestInventoryForecasting:
@@ -62,7 +53,7 @@ class TestInventoryForecasting:
 
     def _run_univariate_forecast(
         self,
-        client: SynthefyAPIClient,
+        client,
         history_df: pd.DataFrame,
         target_df: pd.DataFrame,
     ) -> pd.DataFrame:
@@ -80,7 +71,7 @@ class TestInventoryForecasting:
 
     def _run_multivariate_forecast(
         self,
-        client: SynthefyAPIClient,
+        client,
         history_df: pd.DataFrame,
         target_df: pd.DataFrame,
     ) -> pd.DataFrame:
@@ -98,15 +89,14 @@ class TestInventoryForecasting:
 
     @pytest.mark.parametrize("item_name", ["soup", "tea", "bread", "ice_cream"])
     def test_univariate_forecast_for_item(
-        self, data_df: pd.DataFrame, item_name: str
+        self, data_df: pd.DataFrame, item_name: str, synthefy_client
     ):
         """Test univariate forecasting for each item."""
         history_df, target_df = self._split_data(data_df, item_name)
 
-        with SynthefyAPIClient() as client:
-            forecast_df = self._run_univariate_forecast(
-                client, history_df, target_df
-            )
+        forecast_df = self._run_univariate_forecast(
+            synthefy_client, history_df, target_df
+        )
 
         assert isinstance(forecast_df, pd.DataFrame)
         assert len(forecast_df) == len(target_df)
@@ -116,15 +106,14 @@ class TestInventoryForecasting:
 
     @pytest.mark.parametrize("item_name", ["soup", "tea", "bread", "ice_cream"])
     def test_multivariate_forecast_for_item(
-        self, data_df: pd.DataFrame, item_name: str
+        self, data_df: pd.DataFrame, item_name: str, synthefy_client
     ):
         """Test multivariate forecasting with weather covariates for each item."""
         history_df, target_df = self._split_data(data_df, item_name)
 
-        with SynthefyAPIClient() as client:
-            forecast_df = self._run_multivariate_forecast(
-                client, history_df, target_df
-            )
+        forecast_df = self._run_multivariate_forecast(
+            synthefy_client, history_df, target_df
+        )
 
         assert isinstance(forecast_df, pd.DataFrame)
         assert len(forecast_df) == len(target_df)

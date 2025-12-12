@@ -58,3 +58,65 @@ synthefy/
 ├── tests/                  # Test suite
 └── README.md              # Public documentation
 ```
+
+## Testing (local vs dev vs prod)
+
+We support running API-hitting tests against either:
+
+- **prod (default)**: `https://forecast.synthefy.com`
+- **dev**: `https://dev.forecast.synthefy.com`
+- **local**: `http://localhost:{FORECASTING_API_PORT}`
+
+This is controlled by a pytest option added in `tests/conftest.py`:
+
+- `--synthefy-api-target=prod` (default)
+- `--synthefy-api-target=dev`
+- `--synthefy-api-target=local`
+
+### Environment variables
+
+- **Dev/Prod**
+  - `SYNTHEFY_API_KEY`: required for tests that hit `synthefy.com`. If it is not set, those API-hitting tests will be **skipped**.
+- **Local**
+  - `FORECASTING_API_PORT`: optional (defaults to `8018`). Used to build the local base URL as `http://localhost:{FORECASTING_API_PORT}`.
+  - No API key is required (and the client is configured with `api_key=None`).
+
+### Run tests (prod)
+
+```bash
+cd synthefy-package/synthefy-forecasting/synthefy
+export SYNTHEFY_API_KEY="..."
+uv run pytest -q
+```
+
+### Run tests (dev)
+
+```bash
+cd synthefy-package/synthefy-forecasting/synthefy
+export SYNTHEFY_API_KEY="..."
+uv run pytest -q --synthefy-api-target=dev
+```
+
+### Run tests (local)
+
+1) Bring up the local forecasting API (from the repo root):
+
+```bash
+docker compose -f synthefy-forecasting/docker-compose.yml up 
+```
+
+2) Run pytest targeting local:
+
+```bash
+cd synthefy-package/synthefy-forecasting/synthefy
+export FORECASTING_API_PORT=8018
+uv run pytest -q --synthefy-api-target=local
+```
+
+Notes:
+- The tests set the SDK client `base_url` to `http://localhost:${FORECASTING_API_PORT}` when using `--synthefy-api-target=local`.
+- If you prefer to run only the online API tests, you can select them directly, e.g.:
+
+```bash
+uv run pytest -q tests/online_tests/test_core_forecast_backtest_api.py --synthefy-api-target=local
+```
