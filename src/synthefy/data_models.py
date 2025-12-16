@@ -1453,40 +1453,58 @@ class ForecastV2Response(BaseModel):
 
 
 class APISupportedModels(str, Enum):
-    # Use these names for legend labels
-    PROPHET = "Prophet"
-    ARIMA = "ARIMA"
-    TABPFN = "TabPFN"
-    TOTO = "ToTo"
-    MITRA = "MITRA"
-    SFM_MOE_V1 = "SFM MoE v1"
-    SFM_MOE_V2 = "SFM MoE v2"
+    """
+    Supported models for the Synthefy forecasting API.
+
+    Model names match the aliases defined in the edge server configuration.
+    """
+
+    # Core models
+    MIGAS_1_0 = "Migas-1.0"
+
+    # Foundation models
+    SFM_TABULAR = "sfm-tabular"
+    MOIRAI2 = "moirai2"
+    MOIRAI2_ITERATIVE = "moirai2_iterative"
+
+    # Statistical models
+    PROPHET = "prophet"
+    AUTOARIMA = "autoarima"
+
+    # TimesFM models
+    TIMESFM = "timesfm"
+    TIMESFM_ITERATIVE = "timesfm_iterative"
+
+    # Chronos models
+    CHRONOS2 = "chronos2"
+    CHRONOS2_ITERATIVE = "chronos2_iterative"
 
 
 PLOT_COLORS = {
+    APISupportedModels.MIGAS_1_0: "#fc9260",  # Synthefy Orange
+    APISupportedModels.SFM_TABULAR: "#9b59b6",  # Purple
+    APISupportedModels.MOIRAI2: "#605ed1",  # Slate
+    APISupportedModels.MOIRAI2_ITERATIVE: "#7c6ee3",  # Light Slate
     APISupportedModels.PROPHET: "#16a34a",  # Green
-    APISupportedModels.ARIMA: "#2563eb",  # Blue
-    APISupportedModels.TABPFN: "#9b59b6",  # Purple
-    APISupportedModels.TOTO: "#fbc02d",  # Yellow
-    APISupportedModels.MITRA: "#605ed1",  # Slate
-    APISupportedModels.SFM_MOE_V1: "#e74c3c",  # Vermillion
-    APISupportedModels.SFM_MOE_V2: "#fc9260",  # Synthefy Orange
-    "Chronos": "#89b23c",  # Light green
-    "TimesFM": "#1e3a8a",  # Dark blue
+    APISupportedModels.AUTOARIMA: "#2563eb",  # Blue
+    APISupportedModels.TIMESFM: "#1e3a8a",  # Dark blue
+    APISupportedModels.TIMESFM_ITERATIVE: "#3b5998",  # Medium blue
+    APISupportedModels.CHRONOS2: "#89b23c",  # Light green
+    APISupportedModels.CHRONOS2_ITERATIVE: "#6b8e23",  # Olive green
 }
 
 MULTIVARIATE_SUPPORT_MODELS = [
-    APISupportedModels.MITRA,
-    APISupportedModels.TABPFN,
-    APISupportedModels.TOTO,
-    APISupportedModels.MITRA,
-    APISupportedModels.ARIMA,
-    APISupportedModels.SFM_MOE_V1,
-    APISupportedModels.SFM_MOE_V2,
+    APISupportedModels.MIGAS_1_0,
+    APISupportedModels.SFM_TABULAR,
+    APISupportedModels.MOIRAI2,
+    APISupportedModels.MOIRAI2_ITERATIVE,
+    APISupportedModels.AUTOARIMA,
 ]
 
 
 class ModelMetadata(BaseModel):
+    """Metadata for a forecasting model including multivariate support."""
+
     model: APISupportedModels
     multivariate: bool = False
 
@@ -1504,15 +1522,5 @@ class ModelMetadata(BaseModel):
 
     @property
     def model_name(self) -> str:
-        """TODO: To be deprecated once we use this data model in backend."""
-        name_primitive = self.model.value.lower().replace(" ", "-")
-        if self.multivariate:
-            if self.model in [
-                APISupportedModels.SFM_MOE_V1,
-                APISupportedModels.SFM_MOE_V2,
-            ]:
-                return name_primitive
-            else:
-                return f"{name_primitive}_multivariate"
-        else:
-            return f"{name_primitive}_univariate"
+        """Return the model name string for API requests."""
+        return self.model.value
