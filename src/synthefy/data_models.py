@@ -119,6 +119,9 @@ class SingleEvalSamplePayload(BaseModel):
     metadata: bool = False
     leak_target: bool = False
     column_name: Optional[str] = None
+    text_context: Optional[str] = (
+        None  # Optional text context for Milano models
+    )
 
     @field_validator("history_timestamps", "target_timestamps")
     @classmethod
@@ -1461,6 +1464,7 @@ class APISupportedModels(str, Enum):
 
     # Core models
     MIGAS_1_0 = "Migas-1.0"
+    MILANO = "milano"  # Text + Timeseries forecasting model
 
     # Foundation models
     SFM_TABULAR = "sfm-tabular"
@@ -1482,6 +1486,7 @@ class APISupportedModels(str, Enum):
 
 PLOT_COLORS = {
     APISupportedModels.MIGAS_1_0: "#fc9260",  # Synthefy Orange
+    APISupportedModels.MILANO: "#e74c3c",  # Red - Milano text+timeseries model
     APISupportedModels.SFM_TABULAR: "#9b59b6",  # Purple
     APISupportedModels.MOIRAI2: "#605ed1",  # Slate
     APISupportedModels.MOIRAI2_ITERATIVE: "#7c6ee3",  # Light Slate
