@@ -119,8 +119,8 @@ class SingleEvalSamplePayload(BaseModel):
     metadata: bool = False
     leak_target: bool = False
     column_name: Optional[str] = None
-    text_context: Optional[str] = (
-        None  # Optional text context for Milano models
+    column_description: Optional[str] = (
+        None  # Optional detailed description of what this column represents
     )
 
     @field_validator("history_timestamps", "target_timestamps")
@@ -402,6 +402,21 @@ class ForecastV2Request(BaseModel):
 
     samples: List[List[SingleEvalSamplePayload]]
     model: str
+    text_contexts: Optional[List[Optional[str]]] = (
+        None  # Optional per-scenario text contexts for Milano models
+    )
+
+    @model_validator(mode="after")
+    def validate_text_contexts_length(self):
+        """Validate that text_contexts length matches samples length if provided."""
+        if self.text_contexts is not None:
+            if len(self.text_contexts) != len(self.samples):
+                raise ValueError(
+                    f"text_contexts length ({len(self.text_contexts)}) must match "
+                    f"samples length ({len(self.samples)}). Each text_context "
+                    f"corresponds to one forecast scenario."
+                )
+        return self
 
     @classmethod
     def from_dfs_pre_split(
