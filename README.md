@@ -247,7 +247,7 @@ The synchronous client class for interacting with the Synthefy API.
 - `api_key`: Your Synthefy API key (can also be set via `SYNTHEFY_API_KEY` environment variable)
 - `timeout`: Request timeout in seconds (default: 300.0 / 5 minutes)
 - `max_retries`: Number of retries for transient errors (default: 2)
-- `base_url`: API base URL (default: "https://prod.synthefy.com")
+- `base_url`: API base URL (default: "https://forecast.synthefy.com")
 - `organization`: Optional organization ID for multi-tenant setups
 - `user_agent`: Custom user agent string
 
