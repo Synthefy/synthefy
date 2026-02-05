@@ -1475,34 +1475,55 @@ class APISupportedModels(str, Enum):
     Supported models for the Synthefy forecasting API.
 
     Model names match the aliases defined in the edge server configuration.
+
+    Note: Some models are only available in certain deployment profiles.
+    In the 'gcp-prod' profile, only SFM_TABULAR, MIGAS_LATEST, and MILANO
+    are available. Other models are available in the 'full' profile.
     """
 
-    # Core models
-    MIGAS_1_0 = "Migas-1.0"
-    MILANO = "milano"  # Text + Timeseries forecasting model
+    # === GCP-PROD SUPPORTED MODELS ===
+    # These models are available in all deployment profiles
 
     # Foundation models
     SFM_TABULAR = "sfm-tabular"
-    MOIRAI2 = "moirai2"
-    MOIRAI2_ITERATIVE = "moirai2_iterative"
 
-    # Statistical models
-    PROPHET = "prophet"
-    AUTOARIMA = "autoarima"
+    # Chronos models - Migas-latest is the recommended model for GCP
+    MIGAS_LATEST = "Migas-latest"  # Alias for chronos2 - recommended for GCP
 
-    # TimesFM models
-    TIMESFM = "timesfm"
-    TIMESFM_ITERATIVE = "timesfm_iterative"
+    # Core models
+    MILANO = "milano"  # Text + Timeseries forecasting model using LLM
 
-    # Chronos models
+    # === FULL PROFILE ONLY ===
+    # These models are only available in 'full' or 'local-dev' profiles
+    # They will return errors if used against a GCP-prod deployment
+
+    # Core models (full profile)
+    MIGAS_1_0 = "Migas-1.0"  # Deprecated: Use MIGAS_LATEST instead
+
+    # Foundation models (full profile)
+    MOIRAI2 = "moirai2"  # Not available in gcp-prod
+    MOIRAI2_ITERATIVE = "moirai2_iterative"  # Not available in gcp-prod
+
+    # Statistical models (full profile - statistical pool not deployed in gcp-prod)
+    PROPHET = "prophet"  # Not available in gcp-prod
+    AUTOARIMA = "autoarima"  # Not available in gcp-prod
+
+    # TimesFM models (full profile - timesfm pool not deployed in gcp-prod)
+    TIMESFM = "timesfm"  # Not available in gcp-prod
+    TIMESFM_ITERATIVE = "timesfm_iterative"  # Not available in gcp-prod
+
+    # Chronos models (available in both profiles)
     CHRONOS2 = "chronos2"
     CHRONOS2_ITERATIVE = "chronos2_iterative"
 
 
 PLOT_COLORS = {
-    APISupportedModels.MIGAS_1_0: "#fc9260",  # Synthefy Orange
-    APISupportedModels.MILANO: "#e74c3c",  # Red - Milano text+timeseries model
+    # GCP-prod supported models
     APISupportedModels.SFM_TABULAR: "#9b59b6",  # Purple
+    APISupportedModels.MIGAS_LATEST: "#fc9260",  # Synthefy Orange
+    APISupportedModels.MILANO: "#e74c3c",  # Red - Milano text+timeseries model
+    # Full profile models
+    APISupportedModels.MIGAS_1_0: "#fc9260",  # Synthefy Orange (same as MIGAS_LATEST)
     APISupportedModels.MOIRAI2: "#605ed1",  # Slate
     APISupportedModels.MOIRAI2_ITERATIVE: "#7c6ee3",  # Light Slate
     APISupportedModels.PROPHET: "#16a34a",  # Green
@@ -1515,6 +1536,7 @@ PLOT_COLORS = {
 
 MULTIVARIATE_SUPPORT_MODELS = [
     APISupportedModels.MIGAS_1_0,
+    APISupportedModels.MIGAS_LATEST,
     APISupportedModels.SFM_TABULAR,
     APISupportedModels.MOIRAI2,
     APISupportedModels.MOIRAI2_ITERATIVE,
