@@ -236,7 +236,131 @@ with SynthefyAPIClient(
         print(f"Unexpected error: {e}")
 ```
 
+## Tabular Regression (In-Context)
+
+`SynthefyTabularClient` is a standalone client for **Synthefy Tabular**, an
+in-context learning regressor. Each call supplies labeled context rows
+(`X_train`, `y_train`) and query rows (`X_test`); the model returns one predicted
+value per query row in a single forward pass — there is no training step.
+
+It is independent of the forecasting client above (different model, different
+endpoint, different credential) but is exported from the same package. A single
+`SynthefyTabularClient` runs predictions either against the hosted endpoint or
+locally, selected with the `mode` argument (`"remote"` (default), `"local"`, or
+`"auto"`).
+
+### Hosted Usage (`mode="remote"`)
+
+```python
+from synthefy import SynthefyTabularClient
+
+# Auth uses a Baseten API key, sent as `Authorization: Api-Key <key>`.
+# Pass it explicitly or set the BASETEN_API_KEY environment variable.
+client = SynthefyTabularClient(api_key="your_baseten_api_key")
+
+predictions = client.predict(
+    X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],  # context features
+    y_train=[1.0, 1.0, 2.0],                        # context targets
+    X_test=[[2.0, 2.0], [0.5, 0.5]],                # query features
+)
+print(predictions)  # -> [<float>, <float>]  (one per X_test row)
+```
+
+`X_train`, `y_train`, and `X_test` accept either Python lists or numpy arrays.
+Shapes are validated client-side: `X_train` and `y_train` must have the same
+number of rows, and `X_test` must have the same number of features as `X_train`.
+
+By default the client targets the Baseten inference **gateway**
+(`https://inference.baseten.co/predict`, model `synthefy/synthefy-tabular`). To
+target a **dedicated** deployment instead, point `base_url`/`endpoint` at it and
+set `model=None` (the dedicated endpoint takes the body verbatim, with no `model`
+field):
+
+```python
+from synthefy.tabular_client import DEDICATED_BASE_URL, DEDICATED_ENDPOINT
+
+client = SynthefyTabularClient(
+    api_key="your_baseten_api_key",
+    base_url=DEDICATED_BASE_URL,    # https://model-3m5j7y9w.api.baseten.co
+    endpoint=DEDICATED_ENDPOINT,    # /environments/production/predict
+    model=None,
+)
+```
+
+`timeout` and `max_retries` are also configurable on the constructor.
+
+#### Authentication
+
+- The only credential is a **Baseten API key** (there is no separate Synthefy
+  key for this endpoint).
+- Provide it via the `api_key` argument or the `BASETEN_API_KEY` environment
+  variable. It is sent as the header `Authorization: Api-Key <key>`.
+
+#### Errors
+
+The tabular client reuses the package's
+[exception hierarchy](#exception-hierarchy):
+
+- HTTP `400` → `BadRequestError`, carrying the server's `error` string as the
+  message (e.g. a missing field or unsupported task).
+- HTTP `401` → `AuthenticationError` (bad or missing key).
+- Transient errors (timeouts, connection errors, `429`, `5xx`) are retried with
+  exponential backoff, then surface as `RateLimitError` / `InternalServerError` /
+  `APITimeoutError` / `APIConnectionError`.
+
+### Local Usage (`mode="local"`, Optional, No Network)
+
+The same prediction can run locally — no network call and no API key — via the
+optional [`synthefy-tabular`](https://pypi.org/project/synthefy-tabular/)
+package. Install the extra:
+
+```bash
+pip install "synthefy[local]"
+```
+
+The `local` extra (via `synthefy-tabular>=0.2.2`) supports Python >= 3.9, the
+same floor as the base package.
+
+```python
+from synthefy import SynthefyTabularClient
+
+client = SynthefyTabularClient(mode="local")  # no API key needed
+predictions = client.predict(
+    X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
+    y_train=[1.0, 1.0, 2.0],
+    X_test=[[2.0, 2.0]],
+)
+```
+
+`predict` has the same signature in every mode. The `synthefy-tabular` dependency
+is imported lazily on first use; if it is not installed, a clear `ImportError` is
+raised telling you to `pip install "synthefy[local]"`.
+
+Use `mode="auto"` to prefer local when `synthefy-tabular` is installed and
+transparently fall back to the hosted endpoint (which then requires an API key)
+otherwise:
+
+```python
+client = SynthefyTabularClient(api_key="your_baseten_api_key", mode="auto")
+print(client.mode)  # "local" if synthefy-tabular is installed, else "remote"
+```
+
 ## API Reference
+
+### SynthefyTabularClient (Tabular Regression)
+
+- `SynthefyTabularClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model="synthefy/synthefy-tabular", user_agent=None)`
+  - `mode`: `"remote"` (hosted, default), `"local"` (in-process via
+    `synthefy-tabular`), or `"auto"` (local if installed, else remote).
+  - `api_key` (remote mode) falls back to the `BASETEN_API_KEY` environment
+    variable. Not required in local mode.
+  - For a dedicated deployment, pass `base_url`/`endpoint` and `model=None`.
+- `predict(X_train, y_train, X_test, task="regression", *, timeout=None, extra_headers=None) -> List[float]`
+  - Returns one predicted value per row of `X_test`. `timeout`/`extra_headers`
+    apply to remote mode only.
+- `mode`: the resolved mode (`"auto"` becomes `"local"`/`"remote"` at
+  construction).
+- `close()` / context manager support (`with SynthefyTabularClient(...) as client:`).
 
 ### SynthefyAPIClient (Synchronous)
 
@@ -301,7 +425,8 @@ Each status error includes:
 
 ### Environment Variables
 
-- `SYNTHEFY_API_KEY`: Your Synthefy API key
+- `SYNTHEFY_API_KEY`: Your Synthefy API key (forecasting client)
+- `BASETEN_API_KEY`: Your Baseten API key (`SynthefyTabularClient`)
 
 ## Support
 
