@@ -59,7 +59,7 @@ class TestPricingSimulation:
             timestamp_col="date",
             metadata_cols=["unit_price"],
             leak_cols=["unit_price"],
-            model="Migas-1.0",
+            model="Migas-latest",
         )
 
         # Verify we got results for all price scenarios

@@ -65,7 +65,7 @@ class TestInventoryForecasting:
             timestamp_col=self.TIMESTAMP_COL,
             metadata_cols=[],
             leak_cols=[],
-            model="Migas-1.0",
+            model="Migas-latest",
         )
         return forecast_dfs[0]
 
@@ -83,7 +83,7 @@ class TestInventoryForecasting:
             timestamp_col=self.TIMESTAMP_COL,
             metadata_cols=self.METADATA_COLS,
             leak_cols=self.METADATA_COLS,
-            model="Migas-1.0",
+            model="Migas-latest",
         )
         return forecast_dfs[0]
 
