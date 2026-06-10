@@ -7,6 +7,16 @@ from synthefy import SynthefyAPIClient, SynthefyAsyncAPIClient
 from synthefy.api_client import BASE_URL
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    # Registered here rather than in pytest.ini because this repo's pytest.ini
+    # uses a `[tool:pytest]` section (only valid in setup.cfg), so its options
+    # are not picked up. addinivalue_line works regardless.
+    config.addinivalue_line(
+        "markers",
+        "slow: marks tests as slow or optional, e.g. real local tabular inference",
+    )
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--synthefy-api-target",

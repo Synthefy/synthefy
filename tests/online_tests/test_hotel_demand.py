@@ -112,7 +112,7 @@ class TestHotelDemandForecasting:
             timestamp_col="timestamp",
             metadata_cols=metadata_cols,
             leak_cols=leak_cols,
-            model="Migas-1.0",
+            model="Migas-latest",
         )
 
         assert len(forecast_dfs) == 1
