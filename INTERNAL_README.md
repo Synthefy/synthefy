@@ -2,6 +2,50 @@
 
 How to build and deploy the `synthefy` package on pypi.
 
+## Releasing via GitHub Actions (recommended)
+
+Releases are published to PyPI automatically by the
+[`Publish to PyPI`](.github/workflows/publish.yaml) workflow using **OIDC
+trusted publishing** — GitHub mints a short-lived token at runtime and exchanges
+it with PyPI, so **no PyPI API token / `TWINE_PASSWORD` is stored in the repo**.
+
+### One-time PyPI setup
+
+Register a GitHub trusted publisher for the `synthefy` project at
+<https://pypi.org/manage/project/synthefy/settings/publishing/> (or, before the
+project's first upload, via the "pending publisher" form at
+<https://pypi.org/manage/account/publishing/>) with these exact values:
+
+| Field | Value |
+|-------|-------|
+| PyPI Project Name | `synthefy` |
+| Owner | `Synthefy` |
+| Repository name | `synthefy` |
+| Workflow name | `publish.yaml` |
+| Environment name | `pypi` |
+
+(Optional but recommended) create a `pypi` environment under the repo's
+**Settings → Environments** to add required reviewers / branch restrictions to
+release uploads. The environment name must match both the workflow and the
+trusted-publisher config above.
+
+### Cutting a release
+
+1. Bump `version` in `pyproject.toml` **and** `__version__` in
+   `src/synthefy/__init__.py` (keep them in sync), and update `CHANGELOG.md`.
+2. Merge to `main`.
+3. Create a GitHub Release with a matching tag (e.g. `v3.1.0`). Publishing the
+   release triggers the workflow, which builds the sdist + wheel with `uv build`
+   and uploads them to PyPI via OIDC — no secrets required.
+
+You can also trigger the workflow manually from the **Actions** tab
+(`workflow_dispatch`).
+
+## Manual release (fallback)
+
+The steps below still work if you need to publish from a laptop with a PyPI API
+token, but the GitHub Actions flow above is preferred (no token to manage).
+
 ## Prerequisites
 
 1. **PyPI Account**: Ensure you have access to the Synthefy PyPI account
