@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1]
+
+### Changed
+
+- Documentation only (PyPI long description): the README now reflects the tabular
+  client. The intro, feature list, and installation instructions cover
+  `SynthefyTabularClient` (hosted and local modes) alongside forecasting. No code
+  or API changes — released solely to refresh the immutable PyPI project page.
+
 ## [3.1.0]
 
 ### Added

@@ -5,10 +5,11 @@
 | `dev` | [![Tests](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml/badge.svg?branch=dev)](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml?query=branch%3Adev) |
 | `main` | [![Tests](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml/badge.svg?branch=main)](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml?query=branch%3Amain) |
 
-A Python client for the Synthefy API forecasting service. This package provides an easy-to-use interface for making time series forecasting requests with both synchronous and asynchronous support.
+A Python client for the Synthefy API. It provides time series **forecasting** (synchronous and asynchronous) and **tabular in-context regression** via `SynthefyTabularClient` — which runs against the hosted endpoint or fully locally — with an easy-to-use interface, full type hints, and pydantic validation.
 
 ## Features
 
+- **Tabular In-Context Regression**: `SynthefyTabularClient` predicts from labeled context rows in a single forward pass — hosted on Baseten or fully local, no training step
 - **Sync & Async Support**: Separate clients for synchronous and asynchronous operations
 - **Professional Error Handling**: Comprehensive exception hierarchy with detailed error messages
 - **Retry Logic**: Built-in exponential backoff for transient errors (rate limits, server errors)
@@ -20,6 +21,12 @@ A Python client for the Synthefy API forecasting service. This package provides 
 
 ```bash
 pip install synthefy
+```
+
+For optional fully-local tabular inference (no API key, runs in-process), install the extra:
+
+```bash
+pip install "synthefy[local]"
 ```
 
 ## Quick Start
