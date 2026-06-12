@@ -325,7 +325,7 @@ package. Install the extra:
 pip install "synthefy[local]"
 ```
 
-The `local` extra (via `synthefy-tabular>=0.2.2`) supports Python >= 3.9, the
+The `local` extra (via `synthefy-tabular>=0.2.3`) supports Python >= 3.9, the
 same floor as the base package.
 
 ```python
