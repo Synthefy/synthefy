@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "synthefy"
-version = "3.1.1"
+version = "3.1.2"
 description = "Python client for the Synthefy API forecasting and tabular regression services"
 readme = "README.md"
 license = {text = "MIT"}
@@ -41,9 +41,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # Optional local inference for SynthefyTabularClient(mode="local"/"auto").
-# synthefy-tabular >=0.2.2 supports Python >=3.9, matching this package's floor,
+# synthefy-tabular >=0.2.3 supports Python >=3.9, matching this package's floor,
 # so no environment marker is needed.
-local = ["synthefy-tabular>=0.2.2"]
+local = ["synthefy-tabular>=0.2.3"]
 
 [project.urls]
 Homepage = "https://synthefy.com"

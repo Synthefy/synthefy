@@ -5,7 +5,7 @@ from synthefy.tabular_client import (
     TabularPredictResponse,
 )
 
-__version__ = "3.1.1"
+__version__ = "3.1.2"
 
 __all__ = [
     "SynthefyAPIClient",
