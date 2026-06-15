@@ -1,17 +1,17 @@
 from synthefy.api_client import SynthefyAPIClient, SynthefyAsyncAPIClient
-from synthefy.tabular_client import (
-    SynthefyTabularClient,
-    TabularPredictRequest,
-    TabularPredictResponse,
+from synthefy.nori_client import (
+    SynthefyNoriClient,
+    NoriPredictRequest,
+    NoriPredictResponse,
 )
 
-__version__ = "3.1.2"
+__version__ = "4.0.0"
 
 __all__ = [
     "SynthefyAPIClient",
     "SynthefyAsyncAPIClient",
-    "SynthefyTabularClient",
-    "TabularPredictRequest",
-    "TabularPredictResponse",
+    "SynthefyNoriClient",
+    "NoriPredictRequest",
+    "NoriPredictResponse",
     "__version__",
 ]
