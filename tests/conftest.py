@@ -13,7 +13,7 @@ def pytest_configure(config: pytest.Config) -> None:
     # are not picked up. addinivalue_line works regardless.
     config.addinivalue_line(
         "markers",
-        "slow: marks tests as slow or optional, e.g. real local tabular inference",
+        "slow: marks tests as slow or optional, e.g. real local nori inference",
     )
 
 

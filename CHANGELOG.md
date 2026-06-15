@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0]
+
+The tabular in-context regression product is now **Synthefy Nori**. This is a
+breaking release: the client class, models, module, and optional local-inference
+package were all renamed from `tabular` to `nori`. The forecasting client
+(`SynthefyAPIClient` / `SynthefyAsyncAPIClient`) is unchanged, and the
+`predict(...)` signature is identical — only names changed.
+
+### Changed (BREAKING)
+
+- Renamed `SynthefyTabularClient` → `SynthefyNoriClient`. There is no
+  backward-compatible alias; the old name no longer imports.
+- Renamed the request/response models `TabularPredictRequest` →
+  `NoriPredictRequest` and `TabularPredictResponse` → `NoriPredictResponse`.
+- Renamed the module `synthefy.tabular_client` → `synthefy.nori_client`. Imports
+  such as `from synthefy.nori_client import DEDICATED_BASE_URL, DEDICATED_ENDPOINT`
+  must be updated.
+- The `local` extra now installs `synthefy-nori>=0.1.0` (was
+  `synthefy-tabular>=0.2.3`). Local inference now imports from the `synthefy_nori`
+  package. `pip install "synthefy[local]"` is unchanged.
+- The default hosted gateway model identifier is now `synthefy/nori` (was
+  `synthefy/synthefy-tabular`). The dedicated deployment `base_url`/`endpoint` are
+  unchanged.
+
 ## [3.1.2]
 
 ### Changed
