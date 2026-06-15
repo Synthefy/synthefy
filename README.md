@@ -5,11 +5,11 @@
 | `dev` | [![Tests](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml/badge.svg?branch=dev)](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml?query=branch%3Adev) |
 | `main` | [![Tests](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml/badge.svg?branch=main)](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml?query=branch%3Amain) |
 
-A Python client for the Synthefy API. It provides time series **forecasting** (synchronous and asynchronous) and **tabular in-context regression** via `SynthefyTabularClient` — which runs against the hosted endpoint or fully locally — with an easy-to-use interface, full type hints, and pydantic validation.
+A Python client for the Synthefy API. It provides time series **forecasting** (synchronous and asynchronous) and **tabular in-context regression** via `SynthefyNoriClient` — which runs against the hosted endpoint or fully locally — with an easy-to-use interface, full type hints, and pydantic validation.
 
 ## Features
 
-- **Tabular In-Context Regression**: `SynthefyTabularClient` predicts from labeled context rows in a single forward pass — hosted on Baseten or fully local, no training step
+- **Tabular In-Context Regression**: `SynthefyNoriClient` predicts from labeled context rows in a single forward pass — hosted on Baseten or fully local, no training step
 - **Sync & Async Support**: Separate clients for synchronous and asynchronous operations
 - **Professional Error Handling**: Comprehensive exception hierarchy with detailed error messages
 - **Retry Logic**: Built-in exponential backoff for transient errors (rate limits, server errors)
@@ -243,27 +243,27 @@ with SynthefyAPIClient(
         print(f"Unexpected error: {e}")
 ```
 
-## Tabular Regression (In-Context)
+## Nori — Tabular In-Context Regression
 
-`SynthefyTabularClient` is a standalone client for **Synthefy Tabular**, an
+`SynthefyNoriClient` is a standalone client for **Synthefy Nori**, an
 in-context learning regressor. Each call supplies labeled context rows
 (`X_train`, `y_train`) and query rows (`X_test`); the model returns one predicted
 value per query row in a single forward pass — there is no training step.
 
 It is independent of the forecasting client above (different model, different
 endpoint, different credential) but is exported from the same package. A single
-`SynthefyTabularClient` runs predictions either against the hosted endpoint or
+`SynthefyNoriClient` runs predictions either against the hosted endpoint or
 locally, selected with the `mode` argument (`"remote"` (default), `"local"`, or
 `"auto"`).
 
 ### Hosted Usage (`mode="remote"`)
 
 ```python
-from synthefy import SynthefyTabularClient
+from synthefy import SynthefyNoriClient
 
 # Auth uses a Baseten API key, sent as `Authorization: Api-Key <key>`.
 # Pass it explicitly or set the BASETEN_API_KEY environment variable.
-client = SynthefyTabularClient(api_key="your_baseten_api_key")
+client = SynthefyNoriClient(api_key="your_baseten_api_key")
 
 predictions = client.predict(
     X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],  # context features
@@ -278,15 +278,15 @@ Shapes are validated client-side: `X_train` and `y_train` must have the same
 number of rows, and `X_test` must have the same number of features as `X_train`.
 
 By default the client targets the Baseten inference **gateway**
-(`https://inference.baseten.co/predict`, model `synthefy/synthefy-tabular`). To
+(`https://inference.baseten.co/predict`, model `synthefy/nori`). To
 target a **dedicated** deployment instead, point `base_url`/`endpoint` at it and
 set `model=None` (the dedicated endpoint takes the body verbatim, with no `model`
 field):
 
 ```python
-from synthefy.tabular_client import DEDICATED_BASE_URL, DEDICATED_ENDPOINT
+from synthefy.nori_client import DEDICATED_BASE_URL, DEDICATED_ENDPOINT
 
-client = SynthefyTabularClient(
+client = SynthefyNoriClient(
     api_key="your_baseten_api_key",
     base_url=DEDICATED_BASE_URL,    # https://model-3m5j7y9w.api.baseten.co
     endpoint=DEDICATED_ENDPOINT,    # /environments/production/predict
@@ -305,7 +305,7 @@ client = SynthefyTabularClient(
 
 #### Errors
 
-The tabular client reuses the package's
+The Nori client reuses the package's
 [exception hierarchy](#exception-hierarchy):
 
 - HTTP `400` → `BadRequestError`, carrying the server's `error` string as the
@@ -318,20 +318,20 @@ The tabular client reuses the package's
 ### Local Usage (`mode="local"`, Optional, No Network)
 
 The same prediction can run locally — no network call and no API key — via the
-optional [`synthefy-tabular`](https://pypi.org/project/synthefy-tabular/)
+optional [`synthefy-nori`](https://pypi.org/project/synthefy-nori/)
 package. Install the extra:
 
 ```bash
 pip install "synthefy[local]"
 ```
 
-The `local` extra (via `synthefy-tabular>=0.2.3`) supports Python >= 3.9, the
+The `local` extra (via `synthefy-nori>=0.1.0`) supports Python >= 3.9, the
 same floor as the base package.
 
 ```python
-from synthefy import SynthefyTabularClient
+from synthefy import SynthefyNoriClient
 
-client = SynthefyTabularClient(mode="local")  # no API key needed
+client = SynthefyNoriClient(mode="local")  # no API key needed
 predictions = client.predict(
     X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
     y_train=[1.0, 1.0, 2.0],
@@ -339,26 +339,26 @@ predictions = client.predict(
 )
 ```
 
-`predict` has the same signature in every mode. The `synthefy-tabular` dependency
+`predict` has the same signature in every mode. The `synthefy-nori` dependency
 is imported lazily on first use; if it is not installed, a clear `ImportError` is
 raised telling you to `pip install "synthefy[local]"`.
 
-Use `mode="auto"` to prefer local when `synthefy-tabular` is installed and
+Use `mode="auto"` to prefer local when `synthefy-nori` is installed and
 transparently fall back to the hosted endpoint (which then requires an API key)
 otherwise:
 
 ```python
-client = SynthefyTabularClient(api_key="your_baseten_api_key", mode="auto")
-print(client.mode)  # "local" if synthefy-tabular is installed, else "remote"
+client = SynthefyNoriClient(api_key="your_baseten_api_key", mode="auto")
+print(client.mode)  # "local" if synthefy-nori is installed, else "remote"
 ```
 
 ## API Reference
 
-### SynthefyTabularClient (Tabular Regression)
+### SynthefyNoriClient (Tabular Regression)
 
-- `SynthefyTabularClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model="synthefy/synthefy-tabular", user_agent=None)`
+- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model="synthefy/nori", user_agent=None)`
   - `mode`: `"remote"` (hosted, default), `"local"` (in-process via
-    `synthefy-tabular`), or `"auto"` (local if installed, else remote).
+    `synthefy-nori`), or `"auto"` (local if installed, else remote).
   - `api_key` (remote mode) falls back to the `BASETEN_API_KEY` environment
     variable. Not required in local mode.
   - For a dedicated deployment, pass `base_url`/`endpoint` and `model=None`.
@@ -367,7 +367,7 @@ print(client.mode)  # "local" if synthefy-tabular is installed, else "remote"
     apply to remote mode only.
 - `mode`: the resolved mode (`"auto"` becomes `"local"`/`"remote"` at
   construction).
-- `close()` / context manager support (`with SynthefyTabularClient(...) as client:`).
+- `close()` / context manager support (`with SynthefyNoriClient(...) as client:`).
 
 ### SynthefyAPIClient (Synchronous)
 
@@ -433,7 +433,7 @@ Each status error includes:
 ### Environment Variables
 
 - `SYNTHEFY_API_KEY`: Your Synthefy API key (forecasting client)
-- `BASETEN_API_KEY`: Your Baseten API key (`SynthefyTabularClient`)
+- `BASETEN_API_KEY`: Your Baseten API key (`SynthefyNoriClient`)
 
 ## Support
 

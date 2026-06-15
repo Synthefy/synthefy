@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "synthefy"
-version = "3.1.2"
-description = "Python client for the Synthefy API forecasting and tabular regression services"
+version = "4.0.0"
+description = "Python client for the Synthefy API: time-series forecasting and Nori in-context tabular regression"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
@@ -14,7 +14,7 @@ authors = [
 maintainers = [
     {name = "Synthefy", email = "contact@synthefy.com"}
 ]
-keywords = ["forecasting", "api", "machine-learning", "time-series", "tabular", "regression"]
+keywords = ["forecasting", "api", "machine-learning", "time-series", "tabular", "regression", "nori"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -40,10 +40,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Optional local inference for SynthefyTabularClient(mode="local"/"auto").
-# synthefy-tabular >=0.2.3 supports Python >=3.9, matching this package's floor,
+# Optional local inference for SynthefyNoriClient(mode="local"/"auto").
+# synthefy-nori >=0.1.0 supports Python >=3.9, matching this package's floor,
 # so no environment marker is needed.
-local = ["synthefy-tabular>=0.2.3"]
+local = ["synthefy-nori>=0.1.0"]
 
 [project.urls]
 Homepage = "https://synthefy.com"

@@ -1,6 +1,6 @@
-"""Standalone client for Synthefy Tabular in-context regression.
+"""Standalone client for Synthefy Nori in-context regression.
 
-Synthefy Tabular is an in-context learning regressor: each call supplies labeled
+Synthefy Nori is an in-context learning regressor: each call supplies labeled
 context rows (``X_train``, ``y_train``) and query rows (``X_test``), and the model
 returns one predicted value per query row in a single forward pass -- there is no
 training step.
@@ -10,14 +10,14 @@ This module is self-contained and does not depend on the forecasting client
 package-wide exception types and HTTP error handling from
 :mod:`synthefy.api_client` so that errors behave consistently across the SDK.
 
-A single :class:`SynthefyTabularClient` runs predictions in one of three modes,
+A single :class:`SynthefyNoriClient` runs predictions in one of three modes,
 selected with the ``mode`` constructor argument:
 
 - ``"remote"`` (default) -- calls the hosted Baseten endpoint over HTTPS.
 - ``"local"`` -- runs the same prediction in-process via the optional
-  ``synthefy-tabular`` package (``pip install "synthefy[local]"``), no network and
+  ``synthefy-nori`` package (``pip install "synthefy[local]"``), no network and
   no API key.
-- ``"auto"`` -- use ``"local"`` if the ``synthefy-tabular`` package is installed,
+- ``"auto"`` -- use ``"local"`` if the ``synthefy-nori`` package is installed,
   otherwise fall back to ``"remote"``.
 """
 
@@ -39,7 +39,7 @@ from synthefy.api_client import (
 # Gateway endpoint (default): routes to the model by name, body carries "model".
 GATEWAY_BASE_URL = "https://inference.baseten.co"
 GATEWAY_ENDPOINT = "/predict"
-GATEWAY_MODEL = "synthefy/synthefy-tabular"
+GATEWAY_MODEL = "synthefy/nori"
 
 # Dedicated endpoint: a specific production deployment; body carries no "model".
 # To target it, pass base_url/endpoint to the constructor and set model=None.
@@ -56,8 +56,8 @@ MatrixLike = Union[Sequence[Sequence[float]], np.ndarray]
 VectorLike = Union[Sequence[float], np.ndarray]
 
 
-class TabularPredictRequest(BaseModel):
-    """Request payload for a Synthefy Tabular prediction.
+class NoriPredictRequest(BaseModel):
+    """Request payload for a Synthefy Nori prediction.
 
     Mirrors the hosted inference contract exactly::
 
@@ -82,8 +82,8 @@ class TabularPredictRequest(BaseModel):
     task: str = DEFAULT_TASK
 
 
-class TabularPredictResponse(BaseModel):
-    """Response payload from a Synthefy Tabular prediction.
+class NoriPredictResponse(BaseModel):
+    """Response payload from a Synthefy Nori prediction.
 
     Parameters
     ----------
@@ -130,13 +130,13 @@ def _coerce_vector(arr: VectorLike, name: str) -> np.ndarray:
     return vector
 
 
-def _build_tabular_request(
+def _build_nori_request(
     X_train: MatrixLike,
     y_train: VectorLike,
     X_test: MatrixLike,
     task: str = DEFAULT_TASK,
-) -> TabularPredictRequest:
-    """Validate shapes and build a :class:`TabularPredictRequest`.
+) -> NoriPredictRequest:
+    """Validate shapes and build a :class:`NoriPredictRequest`.
 
     Accepts Python lists or numpy arrays. Raises ``ValueError`` on any shape
     mismatch before a request leaves the process.
@@ -163,7 +163,7 @@ def _build_tabular_request(
     if not isinstance(task, str) or not task.strip():
         raise ValueError("task must be a non-empty string")
 
-    return TabularPredictRequest(
+    return NoriPredictRequest(
         X_train=X_train_arr.tolist(),
         y_train=y_train_arr.tolist(),
         X_test=X_test_arr.tolist(),
@@ -177,27 +177,27 @@ def _as_float_list(values: Any) -> List[float]:
 
 
 def _local_available() -> bool:
-    """Return ``True`` if the optional ``synthefy-tabular`` package is installed.
+    """Return ``True`` if the optional ``synthefy-nori`` package is installed.
 
     Uses ``find_spec`` so it does not import (and thus does not load) the package.
     """
-    return importlib.util.find_spec("synthefy_tabular") is not None
+    return importlib.util.find_spec("synthefy_nori") is not None
 
 
 def _load_local_predict() -> Any:
-    """Lazily import ``synthefy_tabular.predict`` with a helpful error if absent."""
+    """Lazily import ``synthefy_nori.predict`` with a helpful error if absent."""
     try:
-        from synthefy_tabular import predict as local_predict
+        from synthefy_nori import predict as local_predict
     except ImportError as exc:
         raise ImportError(
-            "Local tabular inference requires the optional 'synthefy-tabular' "
+            "Local nori inference requires the optional 'synthefy-nori' "
             'package. Install it with: pip install "synthefy[local]".'
         ) from exc
     return local_predict
 
 
-class SynthefyTabularClient:
-    """Client for Synthefy Tabular in-context regression.
+class SynthefyNoriClient:
+    """Client for Synthefy Nori in-context regression.
 
     Each :meth:`predict` call performs in-context regression: the labeled context
     rows are supplied alongside the query rows and one value per query row is
@@ -208,14 +208,14 @@ class SynthefyTabularClient:
     - ``"remote"`` (default): call the hosted Baseten endpoint over HTTPS.
       Requires a Baseten API key (``api_key`` argument or ``BASETEN_API_KEY``
       environment variable), sent as ``Authorization: Api-Key <key>``.
-    - ``"local"``: run in-process via the optional ``synthefy-tabular`` package
+    - ``"local"``: run in-process via the optional ``synthefy-nori`` package
       (``pip install "synthefy[local]"``). No network and no API key.
-    - ``"auto"``: use ``"local"`` if ``synthefy-tabular`` is installed, otherwise
+    - ``"auto"``: use ``"local"`` if ``synthefy-nori`` is installed, otherwise
       fall back to ``"remote"`` (which then requires an API key).
 
     For remote mode, the client targets the Baseten inference *gateway* by default
     (``https://inference.baseten.co/predict``) and includes
-    ``"model": "synthefy/synthefy-tabular"`` in the request body. To target a
+    ``"model": "synthefy/nori"`` in the request body. To target a
     dedicated deployment instead, pass ``base_url=DEDICATED_BASE_URL``,
     ``endpoint=DEDICATED_ENDPOINT`` and ``model=None`` (the dedicated endpoint
     takes the body verbatim with no ``model`` field).
@@ -251,8 +251,8 @@ class SynthefyTabularClient:
 
     Examples
     --------
-    >>> from synthefy import SynthefyTabularClient
-    >>> client = SynthefyTabularClient(api_key="...")  # or BASETEN_API_KEY
+    >>> from synthefy import SynthefyNoriClient
+    >>> client = SynthefyNoriClient(api_key="...")  # or BASETEN_API_KEY
     >>> preds = client.predict(
     ...     X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
     ...     y_train=[1.0, 1.0, 2.0],
@@ -263,7 +263,7 @@ class SynthefyTabularClient:
 
     Run the same prediction locally (no API key, needs ``synthefy[local]``):
 
-    >>> client = SynthefyTabularClient(mode="local")  # doctest: +SKIP
+    >>> client = SynthefyNoriClient(mode="local")  # doctest: +SKIP
     """
 
     def __init__(
@@ -313,7 +313,7 @@ class SynthefyTabularClient:
             self.client = None
 
     # Context manager support (sync) and utilities
-    def __enter__(self) -> "SynthefyTabularClient":
+    def __enter__(self) -> "SynthefyNoriClient":
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -368,7 +368,7 @@ class SynthefyTabularClient:
             ``y_train`` row counts differ, or ``X_test`` has a different number
             of features than ``X_train``).
         ImportError
-            In local mode, if the optional ``synthefy-tabular`` package is not
+            In local mode, if the optional ``synthefy-nori`` package is not
             installed (with guidance to ``pip install "synthefy[local]"``).
         BadRequestError
             In remote mode, if the server rejects the request (HTTP 400),
@@ -380,7 +380,7 @@ class SynthefyTabularClient:
         APIConnectionError
             In remote mode, if a network/connection error occurs.
         """
-        request = _build_tabular_request(X_train, y_train, X_test, task)
+        request = _build_nori_request(X_train, y_train, X_test, task)
         if self.mode == "local":
             return self._predict_local(request)
         return self._predict_remote(
@@ -391,7 +391,7 @@ class SynthefyTabularClient:
     # Local mode
     # ------------------------------------------------------------------ #
 
-    def _predict_local(self, request: TabularPredictRequest) -> List[float]:
+    def _predict_local(self, request: NoriPredictRequest) -> List[float]:
         local_predict = _load_local_predict()
         result = local_predict(
             request.X_train,
@@ -407,7 +407,7 @@ class SynthefyTabularClient:
 
     def _predict_remote(
         self,
-        request: TabularPredictRequest,
+        request: NoriPredictRequest,
         *,
         timeout: Optional[float],
         extra_headers: Optional[Dict[str, str]],
@@ -422,7 +422,7 @@ class SynthefyTabularClient:
             headers=self._headers(extra_headers=extra_headers),
             timeout=timeout,
         )
-        parsed = TabularPredictResponse(**response.json())
+        parsed = NoriPredictResponse(**response.json())
         return parsed.predictions
 
     def _headers(
