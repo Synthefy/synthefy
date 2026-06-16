@@ -7,10 +7,13 @@ Prerequisites
 
 Run
 ---
-    python dogfood/dogfood_remote.py                       # gateway (default)
-    SYNTHEFY_DOGFOOD_ENDPOINT=dedicated python dogfood/dogfood_remote.py   # dedicated deployment
+    python dogfood/dogfood_remote.py
 
-Pass criteria: exits 0 and prints "REMOTE OK". 401 -> bad/missing key;
+Hits the Baseten inference gateway (https://inference.baseten.co/predict), which
+routes by the model slug in the body. This is the only supported remote path for a
+Frontier/gateway key.
+
+Pass criteria: exits 0 and prints "REMOTE OK". 401/403 -> bad/missing key;
 400 -> bad request; 5xx -> server issue (the client retries first).
 """
 
@@ -19,7 +22,6 @@ import os
 import numpy as np
 
 from synthefy import SynthefyNoriClient
-from synthefy.nori_client import DEDICATED_BASE_URL, DEDICATED_ENDPOINT
 
 TOL = 1.0
 
@@ -46,17 +48,6 @@ def check(preds, expected, tol=TOL):
     return errs
 
 
-def build_client():
-    """Gateway by default; SYNTHEFY_DOGFOOD_ENDPOINT=dedicated targets the dedicated deployment."""
-    if os.getenv("SYNTHEFY_DOGFOOD_ENDPOINT", "gateway").lower() == "dedicated":
-        print("endpoint: dedicated")
-        return SynthefyNoriClient(
-            base_url=DEDICATED_BASE_URL, endpoint=DEDICATED_ENDPOINT, model=None
-        )
-    print("endpoint: gateway")
-    return SynthefyNoriClient()  # gateway default (model=synthefy/nori)
-
-
 def main():
     if not os.getenv("BASETEN_API_KEY"):
         raise SystemExit(
@@ -65,7 +56,7 @@ def main():
 
     X_train, y_train, X_test, expected = make_dataset()
 
-    client = build_client()
+    client = SynthefyNoriClient()  # gateway default (model=synthefy/nori)
     print("url:", client.base_url + client.endpoint, "| mode:", client.mode)
     preds = client.predict(X_train, y_train, X_test)
 

@@ -58,17 +58,14 @@ export BASETEN_API_KEY="<your baseten key>"
 python dogfood/dogfood_remote.py
 ```
 
-By default this hits the **gateway** (`https://inference.baseten.co/predict`). To
-exercise the **dedicated** deployment instead:
-
-```bash
-SYNTHEFY_DOGFOOD_ENDPOINT=dedicated python dogfood/dogfood_remote.py
-```
+This hits the **gateway** (`https://inference.baseten.co/predict`), which routes by
+the `synthefy/nori` model slug in the request body. The gateway is the only remote
+path a Frontier/gateway key can reach — dedicated deployment URLs reject these keys
+with a 403 by design, so the kit no longer targets them.
 
 **Expected output:**
 
 ```
-endpoint: gateway
 url: https://inference.baseten.co/predict | mode: remote
 REMOTE OK
   preds   : [1.452, -4.155, 6.074]
@@ -77,9 +74,10 @@ REMOTE OK
 ```
 
 ✅ **Pass:** prints `REMOTE OK` and exits 0.
-- `AuthenticationError` (401) → bad/missing `BASETEN_API_KEY`.
+- `AuthenticationError` (401) / `PermissionDeniedError` (403) → bad/missing `BASETEN_API_KEY`.
 - `BadRequestError` (400) → carries the server's error string.
 - `InternalServerError` (5xx) → server-side; the client already retried with backoff.
+- Hangs / read timeout → the hosted `synthefy/nori` deployment is asleep or unhealthy; confirm a `curl` to the gateway returns 200.
 
 ---
 
@@ -136,7 +134,6 @@ Copy into your dogfood ticket and tick what you ran:
 
 - [ ] **Local** — `python dogfood/dogfood_local.py` → `LOCAL OK`
 - [ ] **Remote (gateway)** — `python dogfood/dogfood_remote.py` → `REMOTE OK`
-- [ ] **Remote (dedicated)** — `SYNTHEFY_DOGFOOD_ENDPOINT=dedicated ...` → `REMOTE OK`
 - [ ] **Modal T4** — `uvx modal run dogfood/modal_t4.py` → `MODAL T4 OK`
 - [ ] OS / Python version noted: `__________`
 - [ ] Anything surprising noted in the ticket
