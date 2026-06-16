@@ -1,6 +1,6 @@
-"""Dogfood test: SynthefyTabularClient LOCAL mode on a Modal T4 GPU.
+"""Dogfood test: SynthefyNoriClient LOCAL mode on a Modal T4 GPU.
 
-This builds a Modal image with the published ``synthefy[local]==3.1.0`` and runs
+This builds a Modal image with the published ``synthefy[local]==4.0.0`` and runs
 in-process inference on a Tesla T4, confirming CUDA is actually used.
 
 Prerequisites
@@ -26,10 +26,10 @@ import json
 
 import modal
 
-app = modal.App("synthefy-tabular-t4-dogfood")
+app = modal.App("synthefy-nori-t4-dogfood")
 
 image = modal.Image.debian_slim(python_version="3.11").pip_install(
-    "synthefy[local]==3.1.0"
+    "synthefy[local]==4.0.0"
 )
 
 TOL = 1.0
@@ -54,7 +54,7 @@ def run_local_predict() -> str:
     print("ENV:", out)
 
     try:
-        from synthefy import SynthefyTabularClient
+        from synthefy import SynthefyNoriClient
 
         def truth(X):
             return 3.0 * X[:, 0] - 2.0 * X[:, 1] + 1.0
@@ -64,7 +64,7 @@ def run_local_predict() -> str:
         y_train = truth(X_train)
         X_test = np.array([[0.5, 0.5], [-1.0, 1.0], [1.0, -1.0]])
 
-        client = SynthefyTabularClient(mode="local")
+        client = SynthefyNoriClient(mode="local")
         preds = [float(p) for p in client.predict(X_train, y_train, X_test)]
         expected = [float(v) for v in truth(X_test)]
         errs = [abs(p - e) for p, e in zip(preds, expected)]

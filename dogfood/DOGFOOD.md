@@ -1,18 +1,18 @@
-# Synthefy Tabular Client — Dogfood Runbook
+# Synthefy Nori Client — Dogfood Runbook
 
-A self-contained kit for verifying that `SynthefyTabularClient` (shipped in
-`synthefy` **3.1.0**) works across all three execution paths. Clone the repo,
+A self-contained kit for verifying that `SynthefyNoriClient` (shipped in
+`synthefy` **4.0.0**) works across all three execution paths. Clone the repo,
 follow the section for each path, and tick the checklist at the bottom.
 
 ## What we're testing
 
-`SynthefyTabularClient` is an in-context regressor: you pass labeled context rows
+`SynthefyNoriClient` is an in-context regressor: you pass labeled context rows
 (`X_train`, `y_train`) and query rows (`X_test`), and get one prediction per query
 row in a single forward pass. It runs in three modes:
 
 | Path | Mode | Mechanism | Needs |
 |------|------|-----------|-------|
-| **Local (CPU/GPU)** | `mode="local"` | in-process via `synthefy-tabular` | `synthefy[local]`, no key |
+| **Local (CPU/GPU)** | `mode="local"` | in-process via `synthefy-nori` | `synthefy[local]`, no key |
 | **Remote** | `mode="remote"` (default) | HTTPS to hosted Baseten endpoint | `synthefy`, `BASETEN_API_KEY` |
 | **Modal T4** | `mode="local"` on a GPU worker | same as Local, on a Modal T4 | Modal account |
 
@@ -31,7 +31,7 @@ Expected predictions hover around `[1.45, -4.1, 6.06]`.
 ## 1. Local mode (no network, no key)
 
 ```bash
-pip install "synthefy[local]==3.1.0"     # Python >=3.10 recommended (>=3.9 supported)
+pip install "synthefy[local]==4.0.0"     # Python >=3.10 recommended (>=3.9 supported)
 python dogfood/dogfood_local.py
 ```
 
@@ -53,7 +53,7 @@ which is expected.)
 ## 2. Remote mode (hosted Baseten endpoint)
 
 ```bash
-pip install "synthefy==3.1.0"            # lightweight; does NOT install torch
+pip install "synthefy==4.0.0"            # lightweight; does NOT install torch
 export BASETEN_API_KEY="<your baseten key>"
 python dogfood/dogfood_remote.py
 ```
@@ -120,7 +120,7 @@ MODAL T4 OK
 ## Troubleshooting
 
 - **`ImportError: ... pip install "synthefy[local]"`** (local/modal) — the
-  `synthefy-tabular` extra isn't installed. Install it; needs Python ≥3.10 to be
+  `synthefy-nori` extra isn't installed. Install it; needs Python ≥3.10 to be
   effective (the dep is gated to 3.10+).
 - **`DeserializationError: 'torch' module not available`** when running Modal from
   a minimal env — that's why `modal_t4.py` returns a JSON *string*; don't return
@@ -128,7 +128,7 @@ MODAL T4 OK
 - **`File already exists` on a release** — unrelated to dogfooding; means a PyPI
   version wasn't bumped.
 - **Predictions off by > 1.0** — genuine regression; capture the full output and
-  the install (`pip show synthefy synthefy-tabular`) and flag it.
+  the install (`pip show synthefy synthefy-nori`) and flag it.
 
 ## Sign-off checklist
 

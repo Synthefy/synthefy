@@ -1,8 +1,8 @@
-"""Dogfood test: SynthefyTabularClient REMOTE mode (hosted Baseten endpoint).
+"""Dogfood test: SynthefyNoriClient REMOTE mode (hosted Baseten endpoint).
 
 Prerequisites
 -------------
-    pip install "synthefy==3.1.0"             # lightweight; no torch
+    pip install "synthefy==4.0.0"             # lightweight; no torch
     export BASETEN_API_KEY="<your baseten key>"   # sent as `Authorization: Api-Key <key>`
 
 Run
@@ -18,8 +18,8 @@ import os
 
 import numpy as np
 
-from synthefy import SynthefyTabularClient
-from synthefy.tabular_client import DEDICATED_BASE_URL, DEDICATED_ENDPOINT
+from synthefy import SynthefyNoriClient
+from synthefy.nori_client import DEDICATED_BASE_URL, DEDICATED_ENDPOINT
 
 TOL = 1.0
 
@@ -50,11 +50,11 @@ def build_client():
     """Gateway by default; SYNTHEFY_DOGFOOD_ENDPOINT=dedicated targets the dedicated deployment."""
     if os.getenv("SYNTHEFY_DOGFOOD_ENDPOINT", "gateway").lower() == "dedicated":
         print("endpoint: dedicated")
-        return SynthefyTabularClient(
+        return SynthefyNoriClient(
             base_url=DEDICATED_BASE_URL, endpoint=DEDICATED_ENDPOINT, model=None
         )
     print("endpoint: gateway")
-    return SynthefyTabularClient()  # gateway default (model=synthefy/synthefy-tabular)
+    return SynthefyNoriClient()  # gateway default (model=synthefy/nori)
 
 
 def main():

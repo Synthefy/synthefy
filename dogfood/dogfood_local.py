@@ -1,8 +1,8 @@
-"""Dogfood test: SynthefyTabularClient LOCAL mode (in-process, no network, no key).
+"""Dogfood test: SynthefyNoriClient LOCAL mode (in-process, no network, no key).
 
 Prerequisites
 -------------
-    pip install "synthefy[local]==3.1.0"      # Python >=3.9; pulls synthefy-tabular (torch)
+    pip install "synthefy[local]==4.0.0"      # Python >=3.9; pulls synthefy-nori (torch)
 
 Run
 ---
@@ -15,7 +15,7 @@ otherwise CPU.
 
 import numpy as np
 
-from synthefy import SynthefyTabularClient
+from synthefy import SynthefyNoriClient
 
 # Known-answer dataset shared by every dogfood script: y = 3*x0 - 2*x1 + 1.
 TOL = 1.0  # generous; catches gross breakage without flaking on float/precision drift
@@ -46,7 +46,7 @@ def check(preds, expected, tol=TOL):
 def main():
     X_train, y_train, X_test, expected = make_dataset()
 
-    client = SynthefyTabularClient(mode="local")
+    client = SynthefyNoriClient(mode="local")
     preds = client.predict(X_train, y_train, X_test)
 
     errs = check(preds, expected)
