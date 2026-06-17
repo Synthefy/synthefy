@@ -51,6 +51,12 @@ DEFAULT_TASK = "regression"
 Mode = Literal["remote", "local", "auto"]
 _VALID_MODES = ("remote", "local", "auto")
 
+# Authorization header scheme for remote requests. The Baseten inference
+# *gateway* accepts only ``Bearer``; dedicated deployments use ``Api-Key``.
+AuthScheme = Literal["Bearer", "Api-Key"]
+_VALID_AUTH_SCHEMES = ("Bearer", "Api-Key")
+DEFAULT_AUTH_SCHEME: AuthScheme = "Bearer"
+
 # Array-like inputs accepted by ``predict`` -- nested Python sequences or numpy arrays.
 MatrixLike = Union[Sequence[Sequence[float]], np.ndarray]
 VectorLike = Union[Sequence[float], np.ndarray]
@@ -207,7 +213,8 @@ class SynthefyNoriClient:
 
     - ``"remote"`` (default): call the hosted Baseten endpoint over HTTPS.
       Requires a Baseten API key (``api_key`` argument or ``BASETEN_API_KEY``
-      environment variable), sent as ``Authorization: Api-Key <key>``.
+      environment variable), sent as ``Authorization: <auth_scheme> <key>``
+      (``Bearer`` by default).
     - ``"local"``: run in-process via the optional ``synthefy-nori`` package
       (``pip install "synthefy[local]"``). No network and no API key.
     - ``"auto"``: use ``"local"`` if ``synthefy-nori`` is installed, otherwise
@@ -215,10 +222,12 @@ class SynthefyNoriClient:
 
     For remote mode, the client targets the Baseten inference *gateway* by default
     (``https://inference.baseten.co/predict``) and includes
-    ``"model": "synthefy/nori"`` in the request body. To target a
+    ``"model": "synthefy/nori"`` in the request body. The gateway authenticates
+    with the ``Bearer`` scheme (the default ``auth_scheme``). To target a
     dedicated deployment instead, pass ``base_url=DEDICATED_BASE_URL``,
-    ``endpoint=DEDICATED_ENDPOINT`` and ``model=None`` (the dedicated endpoint
-    takes the body verbatim with no ``model`` field).
+    ``endpoint=DEDICATED_ENDPOINT``, ``model=None`` and ``auth_scheme="Api-Key"``
+    (the dedicated endpoint takes the body verbatim with no ``model`` field and
+    authenticates with the ``Api-Key`` scheme).
 
     Parameters
     ----------
@@ -240,6 +249,10 @@ class SynthefyNoriClient:
     model : str or None, default GATEWAY_MODEL
         Model identifier included in the request body (remote mode). Required by
         the gateway; set to ``None`` for dedicated deployments.
+    auth_scheme : {"Bearer", "Api-Key"}, default "Bearer"
+        HTTP ``Authorization`` scheme prefixed to the API key (remote mode). The
+        inference gateway requires ``"Bearer"``; dedicated deployments use
+        ``"Api-Key"``.
     user_agent : str or None, optional
         Custom ``User-Agent`` header (remote mode).
 
@@ -276,11 +289,17 @@ class SynthefyNoriClient:
         base_url: str = GATEWAY_BASE_URL,
         endpoint: str = GATEWAY_ENDPOINT,
         model: Optional[str] = GATEWAY_MODEL,
+        auth_scheme: AuthScheme = DEFAULT_AUTH_SCHEME,
         user_agent: Optional[str] = None,
     ) -> None:
         if mode not in _VALID_MODES:
             raise ValueError(
                 f"mode must be one of {_VALID_MODES}; got {mode!r}"
+            )
+        if auth_scheme not in _VALID_AUTH_SCHEMES:
+            raise ValueError(
+                f"auth_scheme must be one of {_VALID_AUTH_SCHEMES}; "
+                f"got {auth_scheme!r}"
             )
         if mode == "auto":
             mode = "local" if _local_available() else "remote"
@@ -291,6 +310,7 @@ class SynthefyNoriClient:
         self.base_url = base_url
         self.endpoint = endpoint
         self.model = model
+        self.auth_scheme = auth_scheme
         self.user_agent = (
             user_agent or f"synthefy-python httpx/{httpx.__version__}"
         )
@@ -431,7 +451,7 @@ class SynthefyNoriClient:
         headers: Dict[str, str] = {
             "User-Agent": self.user_agent,
             "Content-Type": "application/json",
-            "Authorization": f"Api-Key {self.api_key}",
+            "Authorization": f"{self.auth_scheme} {self.api_key}",
         }
         if extra_headers:
             headers.update(extra_headers)

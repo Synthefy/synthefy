@@ -73,7 +73,8 @@ def test_predict_returns_predictions_and_sends_expected_request():
     assert client.mode == "remote"
     # Gateway is the default: correct path + model field in the body.
     assert capture["path"] == GATEWAY_ENDPOINT
-    assert capture["headers"]["authorization"] == "Api-Key test-key"
+    # Gateway requires the Bearer scheme (the default auth_scheme).
+    assert capture["headers"]["authorization"] == "Bearer test-key"
     assert capture["headers"]["content-type"] == "application/json"
     body = capture["body"]
     assert body["X_train"] == [[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]
@@ -107,6 +108,7 @@ def test_dedicated_endpoint_config_omits_model_field():
         base_url=DEDICATED_BASE_URL,
         endpoint=DEDICATED_ENDPOINT,
         model=None,
+        auth_scheme="Api-Key",
     )
     _attach_mock(client, _ok_handler([1.0], capture))
 
@@ -117,6 +119,8 @@ def test_dedicated_endpoint_config_omits_model_field():
     assert preds == [1.0]
     assert capture["path"] == DEDICATED_ENDPOINT
     assert "model" not in capture["body"]
+    # Dedicated deployments authenticate with the Api-Key scheme.
+    assert capture["headers"]["authorization"] == "Api-Key test-key"
 
 
 # --------------------------------------------------------------------------- #
@@ -147,6 +151,26 @@ def test_local_mode_needs_no_api_key(monkeypatch):
 def test_invalid_mode_raises():
     with pytest.raises(ValueError, match="mode must be one of"):
         SynthefyNoriClient(api_key="test-key", mode="nope")
+
+
+def test_default_auth_scheme_is_bearer():
+    client = SynthefyNoriClient(api_key="test-key")
+    assert client.auth_scheme == "Bearer"
+
+
+def test_auth_scheme_override_sets_authorization_header():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key", auth_scheme="Api-Key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    client.predict(X_train=[[1.0]], y_train=[1.0], X_test=[[2.0]])
+
+    assert capture["headers"]["authorization"] == "Api-Key test-key"
+
+
+def test_invalid_auth_scheme_raises():
+    with pytest.raises(ValueError, match="auth_scheme must be one of"):
+        SynthefyNoriClient(api_key="test-key", auth_scheme="Token")
 
 
 def test_auto_mode_falls_back_to_remote_when_package_absent(monkeypatch):

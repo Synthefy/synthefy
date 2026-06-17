@@ -2,8 +2,8 @@
 
 Prerequisites
 -------------
-    pip install "synthefy==4.0.1"             # lightweight; no torch
-    export BASETEN_API_KEY="<your baseten key>"   # sent as `Authorization: Api-Key <key>`
+    pip install "synthefy==4.1.0"             # lightweight; no torch
+    export BASETEN_API_KEY="<your baseten key>"   # sent as `Authorization: Bearer <key>`
 
 Run
 ---

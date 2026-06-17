@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.0]
+
+### Fixed
+
+- **Remote gateway authentication.** Requests to the default Baseten inference
+  gateway (`https://inference.baseten.co/predict`) now send
+  `Authorization: Bearer <key>` instead of `Authorization: Api-Key <key>`. The
+  gateway accepts only the `Bearer` scheme, so every default-configured remote
+  `predict(...)` call previously failed with HTTP `403` ("please check the
+  api-key you provided") even when the key was valid. Dedicated deployments
+  continue to use `Api-Key` (see below).
+
+### Added
+
+- New `auth_scheme` constructor argument on `SynthefyNoriClient`
+  (`{"Bearer", "Api-Key"}`, default `"Bearer"`). The default fixes gateway
+  auth out of the box; pass `auth_scheme="Api-Key"` when targeting a dedicated
+  deployment. Invalid values raise `ValueError`.
+
 ## [4.0.1]
 
 ### Changed
