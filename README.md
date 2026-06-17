@@ -261,7 +261,7 @@ locally, selected with the `mode` argument (`"remote"` (default), `"local"`, or
 ```python
 from synthefy import SynthefyNoriClient
 
-# Auth uses a Baseten API key, sent as `Authorization: Api-Key <key>`.
+# Auth uses a Baseten API key, sent as `Authorization: Bearer <key>` (gateway default).
 # Pass it explicitly or set the BASETEN_API_KEY environment variable.
 client = SynthefyNoriClient(api_key="your_baseten_api_key")
 
@@ -291,6 +291,7 @@ client = SynthefyNoriClient(
     base_url=DEDICATED_BASE_URL,    # https://model-3m5j7y9w.api.baseten.co
     endpoint=DEDICATED_ENDPOINT,    # /environments/production/predict
     model=None,
+    auth_scheme="Api-Key",          # dedicated endpoints use Api-Key, not Bearer
 )
 ```
 
@@ -301,7 +302,9 @@ client = SynthefyNoriClient(
 - The only credential is a **Baseten API key** (there is no separate Synthefy
   key for this endpoint).
 - Provide it via the `api_key` argument or the `BASETEN_API_KEY` environment
-  variable. It is sent as the header `Authorization: Api-Key <key>`.
+  variable. It is sent as the header `Authorization: <auth_scheme> <key>`. The
+  scheme defaults to `Bearer` (required by the gateway); pass
+  `auth_scheme="Api-Key"` for a dedicated deployment.
 
 #### Errors
 
