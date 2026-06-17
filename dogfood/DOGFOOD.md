@@ -1,7 +1,7 @@
 # Synthefy Nori Client — Dogfood Runbook
 
 A self-contained kit for verifying that `SynthefyNoriClient` (shipped in
-`synthefy` **4.0.0**) works across all three execution paths. Clone the repo,
+`synthefy` **4.0.1**) works across all three execution paths. Clone the repo,
 follow the section for each path, and tick the checklist at the bottom.
 
 ## What we're testing
@@ -31,7 +31,7 @@ Expected predictions hover around `[1.45, -4.1, 6.06]`.
 ## 1. Local mode (no network, no key)
 
 ```bash
-pip install "synthefy[local]==4.0.0"     # Python >=3.10 recommended (>=3.9 supported)
+pip install "synthefy[local]==4.0.1"     # Python >=3.10 recommended (>=3.9 supported)
 python dogfood/dogfood_local.py
 ```
 
@@ -53,7 +53,7 @@ which is expected.)
 ## 2. Remote mode (hosted Baseten endpoint)
 
 ```bash
-pip install "synthefy==4.0.0"            # lightweight; does NOT install torch
+pip install "synthefy==4.0.1"            # lightweight; does NOT install torch
 export BASETEN_API_KEY="<your baseten key>"
 python dogfood/dogfood_remote.py
 ```
