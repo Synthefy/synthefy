@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "synthefy"
-version = "4.1.0"
+version = "4.1.1"
 description = "Python client for the Synthefy API: time-series forecasting and Nori in-context tabular regression"
 readme = "README.md"
 license = {text = "MIT"}
@@ -41,9 +41,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # Optional local inference for SynthefyNoriClient(mode="local"/"auto").
-# synthefy-nori >=0.5.0 supports Python >=3.9, matching this package's floor,
+# synthefy-nori >=0.6.0 supports Python >=3.9, matching this package's floor,
 # so no environment marker is needed.
-local = ["synthefy-nori>=0.5.0"]
+local = ["synthefy-nori>=0.6.0"]
 
 [project.urls]
 Homepage = "https://synthefy.com"
