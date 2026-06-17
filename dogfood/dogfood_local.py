@@ -2,7 +2,7 @@
 
 Prerequisites
 -------------
-    pip install "synthefy[local]==4.0.0"      # Python >=3.9; pulls synthefy-nori (torch)
+    pip install "synthefy[local]==4.0.1"      # Python >=3.9; pulls synthefy-nori (torch)
 
 Run
 ---

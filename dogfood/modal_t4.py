@@ -1,6 +1,6 @@
 """Dogfood test: SynthefyNoriClient LOCAL mode on a Modal T4 GPU.
 
-This builds a Modal image with the published ``synthefy[local]==4.0.0`` and runs
+This builds a Modal image with the published ``synthefy[local]==4.0.1`` and runs
 in-process inference on a Tesla T4, confirming CUDA is actually used.
 
 Prerequisites
@@ -29,7 +29,7 @@ import modal
 app = modal.App("synthefy-nori-t4-dogfood")
 
 image = modal.Image.debian_slim(python_version="3.11").pip_install(
-    "synthefy[local]==4.0.0"
+    "synthefy[local]==4.0.1"
 )
 
 TOL = 1.0

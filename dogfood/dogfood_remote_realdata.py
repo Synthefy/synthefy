@@ -17,7 +17,7 @@ standardized context: mean (Dummy), LinearRegression, HistGradientBoosting.
 
 Prereqs
 -------
-    pip install "synthefy==4.0.0" scikit-learn
+    pip install "synthefy==4.0.1" scikit-learn
     export BASETEN_API_KEY="<your baseten key>"
 
 Run
