@@ -328,7 +328,7 @@ package. Install the extra:
 pip install "synthefy[local]"
 ```
 
-The `local` extra (via `synthefy-nori>=0.6.0`) supports Python >= 3.9, the
+The `local` extra (via `synthefy-nori>=0.8.0`) supports Python >= 3.9, the
 same floor as the base package.
 
 ```python
