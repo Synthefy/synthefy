@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.3]
+
+### Changed
+
+- Bumped the `local` extra's floor to `synthefy-nori>=0.9.0` (was `>=0.8.0`) so
+  `pip install "synthefy[local]"` pulls in the latest local-inference package.
+  `synthefy-nori>=0.9.0` still supports Python >=3.9, matching the base
+  package's floor, so no environment marker is needed. No code or public API
+  changes.
+
 ## [4.1.2]
 
 ### Changed
