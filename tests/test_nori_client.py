@@ -11,6 +11,7 @@ from typing import Callable, Dict, List
 
 import httpx
 import numpy as np
+import pandas as pd
 import pytest
 from synthefy import (
     SynthefyNoriClient,
@@ -99,6 +100,112 @@ def test_predict_accepts_numpy_arrays():
     # numpy inputs are serialized to plain JSON lists of floats.
     assert capture["body"]["X_train"] == [[0.0, 1.0], [1.0, 0.0]]
     assert capture["body"]["y_train"] == [1.0, 2.0]
+
+
+# --------------------------------------------------------------------------- #
+# pandas inputs -- DataFrame / Series
+# --------------------------------------------------------------------------- #
+
+
+def test_predict_accepts_dataframes_and_series():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([5.0], capture))
+
+    X_train = pd.DataFrame({"a": [0.0, 1.0], "b": [1.0, 0.0]})
+    y_train = pd.Series([1.0, 2.0])
+    X_test = pd.DataFrame({"a": [2.0], "b": [2.0]})
+
+    preds = client.predict(X_train, y_train, X_test)
+
+    assert preds == [5.0]
+    # DataFrame/Series inputs serialize to plain JSON lists of floats.
+    assert capture["body"]["X_train"] == [[0.0, 1.0], [1.0, 0.0]]
+    assert capture["body"]["y_train"] == [1.0, 2.0]
+    assert capture["body"]["X_test"] == [[2.0, 2.0]]
+
+
+def test_y_train_single_column_dataframe_is_accepted():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0]}),
+        y_train=pd.DataFrame({"target": [1.0, 2.0]}),
+        X_test=pd.DataFrame({"a": [2.0]}),
+    )
+    assert capture["body"]["y_train"] == [1.0, 2.0]
+
+
+def test_dataframe_xtest_is_aligned_to_xtrain_by_column_name():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([9.0], capture))
+
+    X_train = pd.DataFrame({"a": [0.0, 1.0], "b": [10.0, 11.0]})
+    # X_test columns are in the opposite order; they must be realigned to a, b.
+    X_test = pd.DataFrame({"b": [12.0], "a": [2.0]})
+
+    client.predict(X_train, [1.0, 2.0], X_test)
+
+    # Realigned to X_train's column order (a, b), not X_test's literal order.
+    assert capture["body"]["X_test"] == [[2.0, 12.0]]
+
+
+def test_dataframe_column_set_mismatch_raises():
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="same feature columns"):
+        client.predict(
+            X_train=pd.DataFrame({"a": [0.0, 1.0], "b": [1.0, 0.0]}),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame({"a": [2.0], "c": [2.0]}),
+        )
+
+
+def test_dataframe_non_numeric_column_raises():
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="non-numeric"):
+        client.predict(
+            X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": ["x", "y"]}),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame({"a": [2.0], "cat": ["z"]}),
+        )
+
+
+# --------------------------------------------------------------------------- #
+# NaN / missing values are rejected client-side (every input type)
+# --------------------------------------------------------------------------- #
+
+
+def test_nan_in_numpy_input_raises():
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="NaN/missing"):
+        client.predict(
+            X_train=np.array([[0.0, 1.0], [np.nan, 0.0]]),
+            y_train=np.array([1.0, 2.0]),
+            X_test=np.array([[2.0, 2.0]]),
+        )
+
+
+def test_nan_in_dataframe_input_raises():
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="NaN/missing"):
+        client.predict(
+            X_train=pd.DataFrame({"a": [0.0, 1.0], "b": [1.0, np.nan]}),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame({"a": [2.0], "b": [2.0]}),
+        )
+
+
+def test_nan_in_y_train_raises():
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="NaN/missing"):
+        client.predict(
+            X_train=[[0.0, 1.0], [1.0, 0.0]],
+            y_train=[1.0, float("nan")],
+            X_test=[[2.0, 2.0]],
+        )
 
 
 def test_dedicated_endpoint_config_omits_model_field():

@@ -273,9 +273,27 @@ predictions = client.predict(
 print(predictions)  # -> [<float>, <float>]  (one per X_test row)
 ```
 
-`X_train`, `y_train`, and `X_test` accept either Python lists or numpy arrays.
+`X_train`, `y_train`, and `X_test` accept Python lists, numpy arrays, or pandas
+objects (a `DataFrame` for the feature matrices; a `Series` or single-column
+`DataFrame` for `y_train`). All feature columns must be numeric — encode any
+categorical/text/datetime columns first.
+
+```python
+import pandas as pd
+
+X_train = pd.DataFrame({"price": [9.99, 4.50, 7.25], "promo": [0, 1, 0]})
+y_train = pd.Series([120.0, 305.0, 180.0])
+X_test  = pd.DataFrame({"promo": [1], "price": [5.00]})  # column order need not match
+
+predictions = client.predict(X_train, y_train, X_test)
+```
+
 Shapes are validated client-side: `X_train` and `y_train` must have the same
 number of rows, and `X_test` must have the same number of features as `X_train`.
+When both `X_train` and `X_test` are DataFrames, `X_test` is aligned to
+`X_train`'s columns **by name** (so column order is irrelevant), and a mismatch
+in the column sets raises. **NaN/missing values are rejected** — drop or impute
+them (e.g. `DataFrame.fillna(...)`) before calling `predict()`.
 
 By default the client targets the Baseten inference **gateway**
 (`https://inference.baseten.co/predict`, model `synthefy/nori`). To
@@ -368,6 +386,9 @@ print(client.mode)  # "local" if synthefy-nori is installed, else "remote"
 - `predict(X_train, y_train, X_test, task="regression", *, timeout=None, extra_headers=None) -> List[float]`
   - Returns one predicted value per row of `X_test`. `timeout`/`extra_headers`
     apply to remote mode only.
+  - Inputs accept Python lists, numpy arrays, or pandas DataFrames/Series.
+    Feature columns must be numeric; DataFrame `X_test` is aligned to `X_train`
+    by column name; NaN/missing values are rejected.
 - `mode`: the resolved mode (`"auto"` becomes `"local"`/`"remote"` at
   construction).
 - `close()` / context manager support (`with SynthefyNoriClient(...) as client:`).
