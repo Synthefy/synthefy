@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - When both `X_train` and `X_test` are DataFrames, `X_test` is aligned to
   `X_train`'s columns **by name**, so column order no longer has to match.
   Mismatched column *sets* raise `ValueError`.
+- `predict(..., as_pandas=True)` returns a pandas `Series` instead of the default
+  `list[float]`: one value per `X_test` row, named after `y_train` (its `Series`
+  name or single-column `DataFrame` label, else `"prediction"`) and indexed by
+  `X_test`'s index when it is a pandas object. Mirrors AutoGluon's `as_pandas`;
+  defaults to `False` so existing callers are unaffected.
 
 ## [4.1.3]
 

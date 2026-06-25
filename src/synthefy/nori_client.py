@@ -116,6 +116,28 @@ def _frame_columns(arr: Any) -> Optional[List[Any]]:
     return None
 
 
+def _target_name(y_train: Any) -> Any:
+    """Name for the ``as_pandas`` output Series, taken from ``y_train``.
+
+    Uses the ``Series.name`` or the single-column ``DataFrame``'s column label;
+    falls back to ``"prediction"`` when ``y_train`` carries no name (lists/arrays).
+    """
+    if isinstance(y_train, pd.Series):
+        return y_train.name if y_train.name is not None else "prediction"
+    if isinstance(y_train, pd.DataFrame) and y_train.shape[1] == 1:
+        return y_train.columns[0]
+    return "prediction"
+
+
+def _result_index(X_test: Any) -> Optional[Any]:
+    """Index for the ``as_pandas`` output, copied from ``X_test`` when it is a
+    pandas object so predictions join straight back; ``None`` (default RangeIndex)
+    otherwise."""
+    if isinstance(X_test, (pd.DataFrame, pd.Series)):
+        return X_test.index
+    return None
+
+
 def _reject_non_numeric_columns(frame: pd.DataFrame, name: str) -> None:
     """Raise ``ValueError`` if any column is not numeric.
 
@@ -434,9 +456,10 @@ class SynthefyNoriClient:
         X_test: MatrixLike,
         task: str = DEFAULT_TASK,
         *,
+        as_pandas: bool = False,
         timeout: Optional[float] = None,
         extra_headers: Optional[Dict[str, str]] = None,
-    ) -> List[float]:
+    ) -> Union[List[float], pd.Series]:
         """Predict a value for each query row via in-context regression.
 
         Parameters
@@ -455,6 +478,12 @@ class SynthefyNoriClient:
             order is irrelevant); a mismatch in the column sets raises.
         task : str, default "regression"
             The prediction task. Currently only ``"regression"`` is supported.
+        as_pandas : bool, default False
+            If ``True``, return a pandas ``Series`` instead of a list: one value
+            per ``X_test`` row, named after ``y_train`` (its ``Series`` name or
+            single-column ``DataFrame`` label, else ``"prediction"``) and indexed
+            by ``X_test``'s index when ``X_test`` is a pandas object (so the
+            predictions join straight back). Default is the plain ``list``.
         timeout : float or None, optional
             Override the client timeout for this request (remote mode only;
             ignored in local mode).
@@ -464,7 +493,7 @@ class SynthefyNoriClient:
 
         Returns
         -------
-        List[float]
+        list of float, or pandas.Series if ``as_pandas=True``
             One predicted value per row of ``X_test``.
 
         Raises
@@ -489,10 +518,19 @@ class SynthefyNoriClient:
         """
         request = _build_nori_request(X_train, y_train, X_test, task)
         if self.mode == "local":
-            return self._predict_local(request)
-        return self._predict_remote(
-            request, timeout=timeout, extra_headers=extra_headers
-        )
+            predictions = self._predict_local(request)
+        else:
+            predictions = self._predict_remote(
+                request, timeout=timeout, extra_headers=extra_headers
+            )
+        if as_pandas:
+            return pd.Series(
+                predictions,
+                index=_result_index(X_test),
+                name=_target_name(y_train),
+                dtype=float,
+            )
+        return predictions
 
     # ------------------------------------------------------------------ #
     # Local mode

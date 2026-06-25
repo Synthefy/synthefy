@@ -295,6 +295,16 @@ When both `X_train` and `X_test` are DataFrames, `X_test` is aligned to
 in the column sets raises. **Missing values (NaN) are allowed** — you don't need
 to fill them in beforehand; the model imputes them server-side.
 
+`predict` returns a plain `list[float]` by default. Pass **`as_pandas=True`** to
+get a pandas `Series` instead — one value per `X_test` row, named after `y_train`
+and indexed by `X_test`'s index (when `X_test` is a DataFrame), so predictions
+join straight back:
+
+```python
+preds = client.predict(X_train, y_train, X_test, as_pandas=True)
+# preds is a pd.Series named after y_train, sharing X_test's index
+```
+
 By default the client targets the Baseten inference **gateway**
 (`https://inference.baseten.co/predict`, model `synthefy/nori`). To
 target a **dedicated** deployment instead, point `base_url`/`endpoint` at it and
@@ -389,6 +399,8 @@ print(client.mode)  # "local" if synthefy-nori is installed, else "remote"
   - Inputs accept Python lists, numpy arrays, or pandas DataFrames/Series.
     Feature columns must be numeric; DataFrame `X_test` is aligned to `X_train`
     by column name; missing values (NaN) are imputed server-side.
+  - `as_pandas=True` returns a pandas `Series` (named after `y_train`, indexed by
+    `X_test`) instead of the default `list[float]`.
 - `mode`: the resolved mode (`"auto"` becomes `"local"`/`"remote"` at
   construction).
 - `close()` / context manager support (`with SynthefyNoriClient(...) as client:`).

@@ -175,6 +175,76 @@ def test_dataframe_non_numeric_column_raises():
 
 
 # --------------------------------------------------------------------------- #
+# as_pandas=True -- return a Series (named after y_train, indexed by X_test)
+# --------------------------------------------------------------------------- #
+
+
+def test_default_return_is_a_plain_list_not_series():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0, 2.0], capture))
+
+    out = client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0]}),
+        y_train=pd.Series([1.0, 2.0], name="demand"),
+        X_test=pd.DataFrame({"a": [2.0, 3.0]}),
+    )
+    assert isinstance(out, list)
+    assert out == [1.0, 2.0]
+
+
+def test_as_pandas_returns_series_named_after_y_train_and_indexed_by_xtest():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([10.0, 20.0], capture))
+
+    X_test = pd.DataFrame({"a": [2.0, 3.0]}, index=["w1", "w2"])
+    out = client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0]}),
+        y_train=pd.Series([1.0, 2.0], name="demand"),
+        X_test=X_test,
+        as_pandas=True,
+    )
+
+    assert isinstance(out, pd.Series)
+    assert out.name == "demand"
+    assert list(out.index) == ["w1", "w2"]
+    assert out.tolist() == [10.0, 20.0]
+
+
+def test_as_pandas_uses_single_column_dataframe_y_label():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([7.0], capture))
+
+    out = client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0]}),
+        y_train=pd.DataFrame({"units": [1.0, 2.0]}),
+        X_test=pd.DataFrame({"a": [2.0]}),
+        as_pandas=True,
+    )
+    assert isinstance(out, pd.Series)
+    assert out.name == "units"
+
+
+def test_as_pandas_with_non_pandas_inputs_uses_defaults():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([5.0, 6.0], capture))
+
+    out = client.predict(
+        X_train=[[0.0], [1.0]],
+        y_train=[1.0, 2.0],
+        X_test=[[2.0], [3.0]],
+        as_pandas=True,
+    )
+    assert isinstance(out, pd.Series)
+    assert out.name == "prediction"  # no name available from a plain list
+    assert list(out.index) == [0, 1]  # default RangeIndex
+    assert out.tolist() == [5.0, 6.0]
+
+
+# --------------------------------------------------------------------------- #
 # NaN / missing values are forwarded for server-side imputation (not rejected)
 # --------------------------------------------------------------------------- #
 
