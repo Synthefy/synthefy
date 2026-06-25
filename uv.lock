@@ -2845,7 +2845,7 @@ wheels = [
 
 [[package]]
 name = "synthefy"
-version = "4.1.2"
+version = "4.1.3"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -2879,7 +2879,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.20.0" },
     { name = "pandas", specifier = ">=1.3.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "synthefy-nori", marker = "extra == 'local'", specifier = ">=0.8.0" },
+    { name = "synthefy-nori", marker = "extra == 'local'", specifier = ">=0.9.0" },
 ]
 provides-extras = ["local"]
 
@@ -2893,7 +2893,7 @@ dev = [
 
 [[package]]
 name = "synthefy-nori"
-version = "0.8.0"
+version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "einops" },
@@ -2915,9 +2915,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/60/19/c9889998c1c9eacc1a4e27c61b091abf3d7c3a05b6708e346b248879f82e/synthefy_nori-0.8.0.tar.gz", hash = "sha256:24e9321dda440bd0cf77fcc2f0645beed1f77b3a92740cbf4d5d6f29ee936964", size = 260492, upload-time = "2026-06-20T15:47:57.475Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ca/40/d555d1a167bf335feb88ee97ce8908ecab692aa565b239f3a698cbaa4054/synthefy_nori-0.9.0.tar.gz", hash = "sha256:87549128466e9eca3b213fe2e8f8d67f57886c7902dbc0b02c3f196c4f5bb9f3", size = 261925, upload-time = "2026-06-23T21:39:20.838Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/42/85/41f4bd3f1111669b4951e5bdd77557e5fc8113dce35a5843fd575b153cbd/synthefy_nori-0.8.0-py3-none-any.whl", hash = "sha256:ffe30478ec1b47c598f52867ce7429edef10532839626eaec497fde14272b50e", size = 261151, upload-time = "2026-06-20T15:47:55.793Z" },
+    { url = "https://files.pythonhosted.org/packages/06/bb/092efea3c6851362d2ab794ed6658615784aed4d849fb7fe13f6d7ae890c/synthefy_nori-0.9.0-py3-none-any.whl", hash = "sha256:c449aae1cc1bab6d0cc186b249207cc411ed0993797f4d949370ad72610265b8", size = 262719, upload-time = "2026-06-23T21:39:19.021Z" },
 ]
 
 [[package]]
