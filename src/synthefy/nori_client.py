@@ -136,28 +136,13 @@ def _reject_non_numeric_columns(frame: pd.DataFrame, name: str) -> None:
         )
 
 
-def _reject_nan(matrix: np.ndarray, name: str) -> None:
-    """Raise ``ValueError`` if ``matrix`` contains NaN/missing values.
-
-    Missing values are rejected client-side rather than silently sent for
-    server-side imputation, so the caller controls how gaps are filled. Drop or
-    impute the missing entries before calling predict().
-    """
-    if matrix.size and np.isnan(matrix).any():
-        raise ValueError(
-            f"{name} contains NaN/missing values; Nori requires complete "
-            "numeric inputs. Drop or impute the missing entries (e.g. "
-            "DataFrame.dropna()/fillna()) before calling predict()."
-        )
-
-
 def _coerce_matrix(arr: MatrixLike, name: str) -> np.ndarray:
     """Coerce an array-like into a 2D float ``np.ndarray`` or raise ``ValueError``.
 
     Accepts nested Python sequences, numpy arrays, and pandas DataFrames. A
     pandas DataFrame is checked for non-numeric columns first (so the caller
     gets a clear message rather than a cryptic float-cast error). NaN/missing
-    values are rejected for every input type.
+    values are preserved and forwarded for server-side imputation.
     """
     if isinstance(arr, pd.DataFrame):
         _reject_non_numeric_columns(arr, name)
@@ -175,7 +160,6 @@ def _coerce_matrix(arr: MatrixLike, name: str) -> np.ndarray:
             f"{name} must be 2D with shape (n_rows, n_features); "
             f"got {matrix.ndim}D with shape {matrix.shape}"
         )
-    _reject_nan(matrix, name)
     return matrix
 
 
@@ -183,7 +167,8 @@ def _coerce_vector(arr: VectorLike, name: str) -> np.ndarray:
     """Coerce an array-like into a 1D float ``np.ndarray`` or raise ``ValueError``.
 
     Accepts nested Python sequences, numpy arrays, a pandas Series, or a
-    single-column pandas DataFrame. NaN/missing values are rejected.
+    single-column pandas DataFrame. NaN/missing values are preserved and
+    forwarded for server-side imputation.
     """
     if isinstance(arr, pd.DataFrame):
         if arr.shape[1] != 1:
@@ -212,7 +197,6 @@ def _coerce_vector(arr: VectorLike, name: str) -> np.ndarray:
             f"{name} must be 1D with shape (n_rows,); "
             f"got {vector.ndim}D with shape {vector.shape}"
         )
-    _reject_nan(vector, name)
     return vector
 
 
@@ -228,8 +212,9 @@ def _build_nori_request(
     ``X_train`` and ``X_test`` are DataFrames, ``X_test`` is aligned to
     ``X_train``'s columns *by name* (so column order is irrelevant), and a
     mismatch in the column sets raises ``ValueError``. Otherwise columns are
-    matched positionally, as before. Raises ``ValueError`` on any shape
-    mismatch — and on NaN/missing values — before a request leaves the process.
+    matched positionally, as before. Raises ``ValueError`` on any shape mismatch
+    before a request leaves the process. NaN/missing values are preserved and
+    imputed server-side.
     """
     train_cols = _frame_columns(X_train)
     test_cols = _frame_columns(X_test)
@@ -458,7 +443,8 @@ class SynthefyNoriClient:
         ----------
         X_train : array-like of shape (n_context, n_features)
             Labeled context rows. Python lists, numpy arrays, or a pandas
-            DataFrame are accepted. All columns must be numeric.
+            DataFrame are accepted. All columns must be numeric; missing values
+            (NaN) are allowed and imputed server-side.
         y_train : array-like of shape (n_context,)
             Target value for each context row. A Python list, numpy array, or a
             pandas Series / single-column DataFrame is accepted.
@@ -487,8 +473,7 @@ class SynthefyNoriClient:
             If the input shapes are inconsistent (e.g. ``X_train`` and
             ``y_train`` row counts differ, or ``X_test`` has a different number
             of features than ``X_train``); if a DataFrame column is non-numeric;
-            if DataFrame ``X_train``/``X_test`` have mismatched column sets; or
-            if any input contains NaN/missing values.
+            or if DataFrame ``X_train``/``X_test`` have mismatched column sets.
         ImportError
             In local mode, if the optional ``synthefy-nori`` package is not
             installed (with guidance to ``pip install "synthefy[local]"``).

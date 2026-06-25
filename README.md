@@ -292,8 +292,8 @@ Shapes are validated client-side: `X_train` and `y_train` must have the same
 number of rows, and `X_test` must have the same number of features as `X_train`.
 When both `X_train` and `X_test` are DataFrames, `X_test` is aligned to
 `X_train`'s columns **by name** (so column order is irrelevant), and a mismatch
-in the column sets raises. **NaN/missing values are rejected** — drop or impute
-them (e.g. `DataFrame.fillna(...)`) before calling `predict()`.
+in the column sets raises. **Missing values (NaN) are allowed** — you don't need
+to fill them in beforehand; the model imputes them server-side.
 
 By default the client targets the Baseten inference **gateway**
 (`https://inference.baseten.co/predict`, model `synthefy/nori`). To
@@ -388,7 +388,7 @@ print(client.mode)  # "local" if synthefy-nori is installed, else "remote"
     apply to remote mode only.
   - Inputs accept Python lists, numpy arrays, or pandas DataFrames/Series.
     Feature columns must be numeric; DataFrame `X_test` is aligned to `X_train`
-    by column name; NaN/missing values are rejected.
+    by column name; missing values (NaN) are imputed server-side.
 - `mode`: the resolved mode (`"auto"` becomes `"local"`/`"remote"` at
   construction).
 - `close()` / context manager support (`with SynthefyNoriClient(...) as client:`).

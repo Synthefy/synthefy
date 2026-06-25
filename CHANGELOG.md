@@ -13,19 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Python lists and numpy arrays: a `DataFrame` for `X_train`/`X_test`, and a
   `Series` or single-column `DataFrame` for `y_train`. All feature columns must
   be numeric — non-numeric (categorical/text/datetime) columns raise a clear
-  `ValueError` directing the caller to encode them first.
+  `ValueError` directing the caller to encode them first. Missing values (NaN)
+  are allowed and imputed server-side; no need to fill them in beforehand.
 - When both `X_train` and `X_test` are DataFrames, `X_test` is aligned to
   `X_train`'s columns **by name**, so column order no longer has to match.
   Mismatched column *sets* raise `ValueError`.
-
-### Changed
-
-- **Possibly breaking:** `predict` now rejects `NaN`/missing values in any input
-  (lists, numpy arrays, or pandas objects) with a `ValueError` instead of
-  forwarding them for server-side imputation. Drop or impute missing entries
-  (e.g. `DataFrame.dropna()`/`fillna()`) before calling `predict()`. This makes
-  missing-data handling explicit and caller-controlled. Callers that previously
-  relied on server-side imputation of `NaN` must now fill values themselves.
 
 ## [4.1.3]
 

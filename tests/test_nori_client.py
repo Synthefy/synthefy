@@ -7,6 +7,7 @@ the optional ``synthefy-nori`` package is installed.
 
 import builtins
 import json
+import math
 from typing import Callable, Dict, List
 
 import httpx
@@ -174,38 +175,26 @@ def test_dataframe_non_numeric_column_raises():
 
 
 # --------------------------------------------------------------------------- #
-# NaN / missing values are rejected client-side (every input type)
+# NaN / missing values are forwarded for server-side imputation (not rejected)
 # --------------------------------------------------------------------------- #
 
 
-def test_nan_in_numpy_input_raises():
+def test_nan_is_forwarded_to_the_server():
+    capture: Dict = {}
     client = SynthefyNoriClient(api_key="test-key")
-    with pytest.raises(ValueError, match="NaN/missing"):
-        client.predict(
-            X_train=np.array([[0.0, 1.0], [np.nan, 0.0]]),
-            y_train=np.array([1.0, 2.0]),
-            X_test=np.array([[2.0, 2.0]]),
-        )
+    _attach_mock(client, _ok_handler([1.0], capture))
 
+    # A missing value in any input must NOT raise; the model imputes it
+    # server-side. The NaN rides through to the request body unchanged.
+    client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0], "b": [1.0, np.nan]}),
+        y_train=[1.0, 2.0],
+        X_test=np.array([[2.0, 2.0]]),
+    )
 
-def test_nan_in_dataframe_input_raises():
-    client = SynthefyNoriClient(api_key="test-key")
-    with pytest.raises(ValueError, match="NaN/missing"):
-        client.predict(
-            X_train=pd.DataFrame({"a": [0.0, 1.0], "b": [1.0, np.nan]}),
-            y_train=[1.0, 2.0],
-            X_test=pd.DataFrame({"a": [2.0], "b": [2.0]}),
-        )
-
-
-def test_nan_in_y_train_raises():
-    client = SynthefyNoriClient(api_key="test-key")
-    with pytest.raises(ValueError, match="NaN/missing"):
-        client.predict(
-            X_train=[[0.0, 1.0], [1.0, 0.0]],
-            y_train=[1.0, float("nan")],
-            X_test=[[2.0, 2.0]],
-        )
+    # json.loads parses the non-strict ``NaN`` token back to float('nan').
+    sent = capture["body"]["X_train"]
+    assert math.isnan(sent[1][1])
 
 
 def test_dedicated_endpoint_config_omits_model_field():
