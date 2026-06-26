@@ -7,10 +7,12 @@ the optional ``synthefy-nori`` package is installed.
 
 import builtins
 import json
+import math
 from typing import Callable, Dict, List
 
 import httpx
 import numpy as np
+import pandas as pd
 import pytest
 from synthefy import (
     SynthefyNoriClient,
@@ -99,6 +101,170 @@ def test_predict_accepts_numpy_arrays():
     # numpy inputs are serialized to plain JSON lists of floats.
     assert capture["body"]["X_train"] == [[0.0, 1.0], [1.0, 0.0]]
     assert capture["body"]["y_train"] == [1.0, 2.0]
+
+
+# --------------------------------------------------------------------------- #
+# pandas inputs -- DataFrame / Series
+# --------------------------------------------------------------------------- #
+
+
+def test_predict_accepts_dataframes_and_series():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([5.0], capture))
+
+    X_train = pd.DataFrame({"a": [0.0, 1.0], "b": [1.0, 0.0]})
+    y_train = pd.Series([1.0, 2.0])
+    X_test = pd.DataFrame({"a": [2.0], "b": [2.0]})
+
+    preds = client.predict(X_train, y_train, X_test)
+
+    assert preds == [5.0]
+    # DataFrame/Series inputs serialize to plain JSON lists of floats.
+    assert capture["body"]["X_train"] == [[0.0, 1.0], [1.0, 0.0]]
+    assert capture["body"]["y_train"] == [1.0, 2.0]
+    assert capture["body"]["X_test"] == [[2.0, 2.0]]
+
+
+def test_y_train_single_column_dataframe_is_accepted():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0]}),
+        y_train=pd.DataFrame({"target": [1.0, 2.0]}),
+        X_test=pd.DataFrame({"a": [2.0]}),
+    )
+    assert capture["body"]["y_train"] == [1.0, 2.0]
+
+
+def test_dataframe_xtest_is_aligned_to_xtrain_by_column_name():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([9.0], capture))
+
+    X_train = pd.DataFrame({"a": [0.0, 1.0], "b": [10.0, 11.0]})
+    # X_test columns are in the opposite order; they must be realigned to a, b.
+    X_test = pd.DataFrame({"b": [12.0], "a": [2.0]})
+
+    client.predict(X_train, [1.0, 2.0], X_test)
+
+    # Realigned to X_train's column order (a, b), not X_test's literal order.
+    assert capture["body"]["X_test"] == [[2.0, 12.0]]
+
+
+def test_dataframe_column_set_mismatch_raises():
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="same feature columns"):
+        client.predict(
+            X_train=pd.DataFrame({"a": [0.0, 1.0], "b": [1.0, 0.0]}),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame({"a": [2.0], "c": [2.0]}),
+        )
+
+
+def test_dataframe_non_numeric_column_raises():
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="non-numeric"):
+        client.predict(
+            X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": ["x", "y"]}),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame({"a": [2.0], "cat": ["z"]}),
+        )
+
+
+# --------------------------------------------------------------------------- #
+# as_pandas=True -- return a Series (named after y_train, indexed by X_test)
+# --------------------------------------------------------------------------- #
+
+
+def test_default_return_is_a_plain_list_not_series():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0, 2.0], capture))
+
+    out = client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0]}),
+        y_train=pd.Series([1.0, 2.0], name="demand"),
+        X_test=pd.DataFrame({"a": [2.0, 3.0]}),
+    )
+    assert isinstance(out, list)
+    assert out == [1.0, 2.0]
+
+
+def test_as_pandas_returns_series_named_after_y_train_and_indexed_by_xtest():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([10.0, 20.0], capture))
+
+    X_test = pd.DataFrame({"a": [2.0, 3.0]}, index=["w1", "w2"])
+    out = client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0]}),
+        y_train=pd.Series([1.0, 2.0], name="demand"),
+        X_test=X_test,
+        as_pandas=True,
+    )
+
+    assert isinstance(out, pd.Series)
+    assert out.name == "demand"
+    assert list(out.index) == ["w1", "w2"]
+    assert out.tolist() == [10.0, 20.0]
+
+
+def test_as_pandas_uses_single_column_dataframe_y_label():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([7.0], capture))
+
+    out = client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0]}),
+        y_train=pd.DataFrame({"units": [1.0, 2.0]}),
+        X_test=pd.DataFrame({"a": [2.0]}),
+        as_pandas=True,
+    )
+    assert isinstance(out, pd.Series)
+    assert out.name == "units"
+
+
+def test_as_pandas_with_non_pandas_inputs_uses_defaults():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([5.0, 6.0], capture))
+
+    out = client.predict(
+        X_train=[[0.0], [1.0]],
+        y_train=[1.0, 2.0],
+        X_test=[[2.0], [3.0]],
+        as_pandas=True,
+    )
+    assert isinstance(out, pd.Series)
+    assert out.name == "prediction"  # no name available from a plain list
+    assert list(out.index) == [0, 1]  # default RangeIndex
+    assert out.tolist() == [5.0, 6.0]
+
+
+# --------------------------------------------------------------------------- #
+# NaN / missing values are forwarded for server-side imputation (not rejected)
+# --------------------------------------------------------------------------- #
+
+
+def test_nan_is_forwarded_to_the_server():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    # A missing value in any input must NOT raise; the model imputes it
+    # server-side. The NaN rides through to the request body unchanged.
+    client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0], "b": [1.0, np.nan]}),
+        y_train=[1.0, 2.0],
+        X_test=np.array([[2.0, 2.0]]),
+    )
+
+    # json.loads parses the non-strict ``NaN`` token back to float('nan').
+    sent = capture["body"]["X_train"]
+    assert math.isnan(sent[1][1])
 
 
 def test_dedicated_endpoint_config_omits_model_field():

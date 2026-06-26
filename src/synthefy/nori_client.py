@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 
 import httpx
 import numpy as np
+import pandas as pd
 from pydantic import BaseModel
 
 from synthefy.api_client import (
@@ -57,9 +58,10 @@ AuthScheme = Literal["Bearer", "Api-Key"]
 _VALID_AUTH_SCHEMES = ("Bearer", "Api-Key")
 DEFAULT_AUTH_SCHEME: AuthScheme = "Bearer"
 
-# Array-like inputs accepted by ``predict`` -- nested Python sequences or numpy arrays.
-MatrixLike = Union[Sequence[Sequence[float]], np.ndarray]
-VectorLike = Union[Sequence[float], np.ndarray]
+# Array-like inputs accepted by ``predict`` -- nested Python sequences, numpy
+# arrays, or pandas DataFrames/Series (all coerced to plain numeric arrays).
+MatrixLike = Union[Sequence[Sequence[float]], np.ndarray, pd.DataFrame]
+VectorLike = Union[Sequence[float], np.ndarray, pd.Series, pd.DataFrame]
 
 
 class NoriPredictRequest(BaseModel):
@@ -103,15 +105,78 @@ class NoriPredictResponse(BaseModel):
     predictions: List[float]
 
 
-def _coerce_matrix(arr: MatrixLike, name: str) -> np.ndarray:
-    """Coerce an array-like into a 2D float ``np.ndarray`` or raise ``ValueError``."""
-    try:
-        matrix = np.asarray(arr, dtype=float)
-    except (ValueError, TypeError) as exc:
+def _frame_columns(arr: Any) -> Optional[List[Any]]:
+    """Return a DataFrame's column labels, or ``None`` if ``arr`` is not one.
+
+    Used to align ``X_test`` to ``X_train`` by column name when both inputs are
+    pandas DataFrames (see :func:`_build_nori_request`).
+    """
+    if isinstance(arr, pd.DataFrame):
+        return list(arr.columns)
+    return None
+
+
+def _target_name(y_train: Any) -> Any:
+    """Name for the ``as_pandas`` output Series, taken from ``y_train``.
+
+    Uses the ``Series.name`` or the single-column ``DataFrame``'s column label;
+    falls back to ``"prediction"`` when ``y_train`` carries no name (lists/arrays).
+    """
+    if isinstance(y_train, pd.Series):
+        return y_train.name if y_train.name is not None else "prediction"
+    if isinstance(y_train, pd.DataFrame) and y_train.shape[1] == 1:
+        return y_train.columns[0]
+    return "prediction"
+
+
+def _result_index(X_test: Any) -> Optional[Any]:
+    """Index for the ``as_pandas`` output, copied from ``X_test`` when it is a
+    pandas object so predictions join straight back; ``None`` (default RangeIndex)
+    otherwise."""
+    if isinstance(X_test, (pd.DataFrame, pd.Series)):
+        return X_test.index
+    return None
+
+
+def _reject_non_numeric_columns(frame: pd.DataFrame, name: str) -> None:
+    """Raise ``ValueError`` if any column is not numeric.
+
+    Nori is a numeric-only model, so categorical/text/datetime columns must be
+    encoded by the caller before prediction. ``bool`` and integer columns are
+    treated as numeric.
+    """
+    non_numeric = [
+        str(col)
+        for col in frame.columns
+        if not pd.api.types.is_numeric_dtype(frame[col])
+    ]
+    if non_numeric:
         raise ValueError(
-            f"{name} must be a numeric 2D array/list with equal-length rows; "
-            f"got error: {exc}"
-        ) from exc
+            f"{name} has non-numeric column(s) {non_numeric}; Nori is a "
+            "numeric-only model. Encode categorical/text/datetime columns "
+            "(e.g. one-hot or ordinal encoding) before calling predict()."
+        )
+
+
+def _coerce_matrix(arr: MatrixLike, name: str) -> np.ndarray:
+    """Coerce an array-like into a 2D float ``np.ndarray`` or raise ``ValueError``.
+
+    Accepts nested Python sequences, numpy arrays, and pandas DataFrames. A
+    pandas DataFrame is checked for non-numeric columns first (so the caller
+    gets a clear message rather than a cryptic float-cast error). NaN/missing
+    values are preserved and forwarded for server-side imputation.
+    """
+    if isinstance(arr, pd.DataFrame):
+        _reject_non_numeric_columns(arr, name)
+        matrix = arr.to_numpy(dtype=float)
+    else:
+        try:
+            matrix = np.asarray(arr, dtype=float)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"{name} must be a numeric 2D array/list with equal-length rows; "
+                f"got error: {exc}"
+            ) from exc
     if matrix.ndim != 2:
         raise ValueError(
             f"{name} must be 2D with shape (n_rows, n_features); "
@@ -121,13 +186,34 @@ def _coerce_matrix(arr: MatrixLike, name: str) -> np.ndarray:
 
 
 def _coerce_vector(arr: VectorLike, name: str) -> np.ndarray:
-    """Coerce an array-like into a 1D float ``np.ndarray`` or raise ``ValueError``."""
-    try:
-        vector = np.asarray(arr, dtype=float)
-    except (ValueError, TypeError) as exc:
-        raise ValueError(
-            f"{name} must be a numeric 1D array/list; got error: {exc}"
-        ) from exc
+    """Coerce an array-like into a 1D float ``np.ndarray`` or raise ``ValueError``.
+
+    Accepts nested Python sequences, numpy arrays, a pandas Series, or a
+    single-column pandas DataFrame. NaN/missing values are preserved and
+    forwarded for server-side imputation.
+    """
+    if isinstance(arr, pd.DataFrame):
+        if arr.shape[1] != 1:
+            raise ValueError(
+                f"{name} must be 1D; got a DataFrame with {arr.shape[1]} "
+                "columns. Pass a single column (a Series) for the targets."
+            )
+        _reject_non_numeric_columns(arr, name)
+        vector = arr.to_numpy(dtype=float).reshape(-1)
+    elif isinstance(arr, pd.Series):
+        if not pd.api.types.is_numeric_dtype(arr):
+            raise ValueError(
+                f"{name} must be numeric; got a non-numeric Series "
+                f"(dtype {arr.dtype})."
+            )
+        vector = arr.to_numpy(dtype=float)
+    else:
+        try:
+            vector = np.asarray(arr, dtype=float)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"{name} must be a numeric 1D array/list; got error: {exc}"
+            ) from exc
     if vector.ndim != 1:
         raise ValueError(
             f"{name} must be 1D with shape (n_rows,); "
@@ -144,9 +230,26 @@ def _build_nori_request(
 ) -> NoriPredictRequest:
     """Validate shapes and build a :class:`NoriPredictRequest`.
 
-    Accepts Python lists or numpy arrays. Raises ``ValueError`` on any shape
-    mismatch before a request leaves the process.
+    Accepts Python lists, numpy arrays, or pandas DataFrames/Series. When both
+    ``X_train`` and ``X_test`` are DataFrames, ``X_test`` is aligned to
+    ``X_train``'s columns *by name* (so column order is irrelevant), and a
+    mismatch in the column sets raises ``ValueError``. Otherwise columns are
+    matched positionally, as before. Raises ``ValueError`` on any shape mismatch
+    before a request leaves the process. NaN/missing values are preserved and
+    imputed server-side.
     """
+    train_cols = _frame_columns(X_train)
+    test_cols = _frame_columns(X_test)
+    if train_cols is not None and test_cols is not None and train_cols != test_cols:
+        if set(train_cols) != set(test_cols):
+            raise ValueError(
+                "X_train and X_test must have the same feature columns; "
+                f"X_train has {train_cols} but X_test has {test_cols}."
+            )
+        # Same columns, different order: reorder X_test to match X_train so the
+        # model sees features in a consistent position.
+        X_test = X_test[train_cols]
+
     X_train_arr = _coerce_matrix(X_train, "X_train")
     X_test_arr = _coerce_matrix(X_test, "X_test")
     y_train_arr = _coerce_vector(y_train, "y_train")
@@ -353,22 +456,34 @@ class SynthefyNoriClient:
         X_test: MatrixLike,
         task: str = DEFAULT_TASK,
         *,
+        as_pandas: bool = False,
         timeout: Optional[float] = None,
         extra_headers: Optional[Dict[str, str]] = None,
-    ) -> List[float]:
+    ) -> Union[List[float], pd.Series]:
         """Predict a value for each query row via in-context regression.
 
         Parameters
         ----------
         X_train : array-like of shape (n_context, n_features)
-            Labeled context rows. Python lists or numpy arrays are accepted.
+            Labeled context rows. Python lists, numpy arrays, or a pandas
+            DataFrame are accepted. All columns must be numeric; missing values
+            (NaN) are allowed and imputed server-side.
         y_train : array-like of shape (n_context,)
-            Target value for each context row.
+            Target value for each context row. A Python list, numpy array, or a
+            pandas Series / single-column DataFrame is accepted.
         X_test : array-like of shape (n_query, n_features)
             Query rows to predict. Must have the same number of features as
-            ``X_train``.
+            ``X_train``. When both ``X_train`` and ``X_test`` are DataFrames,
+            ``X_test`` is aligned to ``X_train``'s columns *by name* (column
+            order is irrelevant); a mismatch in the column sets raises.
         task : str, default "regression"
             The prediction task. Currently only ``"regression"`` is supported.
+        as_pandas : bool, default False
+            If ``True``, return a pandas ``Series`` instead of a list: one value
+            per ``X_test`` row, named after ``y_train`` (its ``Series`` name or
+            single-column ``DataFrame`` label, else ``"prediction"``) and indexed
+            by ``X_test``'s index when ``X_test`` is a pandas object (so the
+            predictions join straight back). Default is the plain ``list``.
         timeout : float or None, optional
             Override the client timeout for this request (remote mode only;
             ignored in local mode).
@@ -378,7 +493,7 @@ class SynthefyNoriClient:
 
         Returns
         -------
-        List[float]
+        list of float, or pandas.Series if ``as_pandas=True``
             One predicted value per row of ``X_test``.
 
         Raises
@@ -386,7 +501,8 @@ class SynthefyNoriClient:
         ValueError
             If the input shapes are inconsistent (e.g. ``X_train`` and
             ``y_train`` row counts differ, or ``X_test`` has a different number
-            of features than ``X_train``).
+            of features than ``X_train``); if a DataFrame column is non-numeric;
+            or if DataFrame ``X_train``/``X_test`` have mismatched column sets.
         ImportError
             In local mode, if the optional ``synthefy-nori`` package is not
             installed (with guidance to ``pip install "synthefy[local]"``).
@@ -402,10 +518,19 @@ class SynthefyNoriClient:
         """
         request = _build_nori_request(X_train, y_train, X_test, task)
         if self.mode == "local":
-            return self._predict_local(request)
-        return self._predict_remote(
-            request, timeout=timeout, extra_headers=extra_headers
-        )
+            predictions = self._predict_local(request)
+        else:
+            predictions = self._predict_remote(
+                request, timeout=timeout, extra_headers=extra_headers
+            )
+        if as_pandas:
+            return pd.Series(
+                predictions,
+                index=_result_index(X_test),
+                name=_target_name(y_train),
+                dtype=float,
+            )
+        return predictions
 
     # ------------------------------------------------------------------ #
     # Local mode
