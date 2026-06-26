@@ -24,7 +24,8 @@ selected with the ``mode`` constructor argument:
 import importlib.util
 import os
 import time
-from typing import Any, Dict, List, Literal, Optional, Sequence, Union
+import warnings
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 import httpx
 import numpy as np
@@ -222,33 +223,126 @@ def _coerce_vector(arr: VectorLike, name: str) -> np.ndarray:
     return vector
 
 
+# Default cap on a categorical column's distinct values before one-hot encoding.
+# Columns above this are dropped (with a warning) rather than exploding the
+# feature matrix — matches the model repo's offline evaluator, which drops
+# string columns with >100 unique values.
+_DEFAULT_MAX_CARDINALITY = 100
+
+
+def _has_encodable_columns(frame: pd.DataFrame) -> bool:
+    """``True`` if any column is non-numeric (so featurization is needed)."""
+    return any(
+        not pd.api.types.is_numeric_dtype(frame[col]) for col in frame.columns
+    )
+
+
+def _featurize_frames(
+    X_train: pd.DataFrame, X_test: pd.DataFrame, max_cardinality: int
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """One-hot encode non-numeric columns of two aligned frames (fit on train).
+
+    Numeric columns (including ``bool``) pass through unchanged. Datetime columns
+    and categorical columns with more than ``max_cardinality`` distinct *training*
+    values are dropped with a ``UserWarning``. Categories come from ``X_train``:
+    a value seen only in ``X_test`` maps to an all-zeros indicator group, and a
+    category absent from ``X_test`` is still emitted as a zero column — so both
+    frames come out with identical numeric columns and the server receives a
+    fully model-ready matrix (no reliance on server-side category detection).
+
+    ``X_train`` and ``X_test`` must already share the same columns (callers align
+    them by name first). Row order and count are preserved.
+    """
+    numeric_cols: List[Any] = []
+    cat_cols: List[Any] = []
+    dropped: List[str] = []
+    for col in X_train.columns:
+        s = X_train[col]
+        if pd.api.types.is_numeric_dtype(s):
+            numeric_cols.append(col)
+        elif pd.api.types.is_datetime64_any_dtype(s):
+            dropped.append(f"{col!r} (datetime)")
+        elif s.nunique(dropna=True) > max_cardinality:
+            dropped.append(f"{col!r} (>{max_cardinality} unique values)")
+        else:
+            cat_cols.append(col)
+
+    if dropped:
+        warnings.warn(
+            "Nori one-hot featurization dropped non-encodable column(s): "
+            + ", ".join(dropped)
+            + ". Encode them yourself (e.g. target/hash encoding) if you need them.",
+            stacklevel=3,
+        )
+
+    if cat_cols:
+        train_d = pd.get_dummies(
+            X_train[cat_cols].astype(object), columns=cat_cols, dtype=np.uint8
+        )
+        test_d = pd.get_dummies(
+            X_test[cat_cols].astype(object), columns=cat_cols, dtype=np.uint8
+        ).reindex(columns=train_d.columns, fill_value=0)
+        X_train_feat = pd.concat(
+            [X_train[numeric_cols].reset_index(drop=True),
+             train_d.reset_index(drop=True)],
+            axis=1,
+        )
+        X_test_feat = pd.concat(
+            [X_test[numeric_cols].reset_index(drop=True),
+             test_d.reset_index(drop=True)],
+            axis=1,
+        )
+    else:
+        X_train_feat = X_train[numeric_cols].reset_index(drop=True)
+        X_test_feat = X_test[numeric_cols].reset_index(drop=True)
+
+    if X_train_feat.shape[1] == 0:
+        raise ValueError(
+            "No usable feature columns remain after one-hot featurization (all "
+            "columns were datetime or above the "
+            f"max_categorical_cardinality={max_cardinality} cap)."
+        )
+    return X_train_feat, X_test_feat
+
+
 def _build_nori_request(
     X_train: MatrixLike,
     y_train: VectorLike,
     X_test: MatrixLike,
     task: str = DEFAULT_TASK,
+    max_categorical_cardinality: int = _DEFAULT_MAX_CARDINALITY,
 ) -> NoriPredictRequest:
     """Validate shapes and build a :class:`NoriPredictRequest`.
 
     Accepts Python lists, numpy arrays, or pandas DataFrames/Series. When both
     ``X_train`` and ``X_test`` are DataFrames, ``X_test`` is aligned to
     ``X_train``'s columns *by name* (so column order is irrelevant), and a
-    mismatch in the column sets raises ``ValueError``. Otherwise columns are
-    matched positionally, as before. Raises ``ValueError`` on any shape mismatch
-    before a request leaves the process. NaN/missing values are preserved and
-    imputed server-side.
+    mismatch in the column sets raises ``ValueError``; then any non-numeric
+    columns are one-hot encoded (fit on ``X_train``, applied to ``X_test``) so
+    the request carries a fully numeric matrix. Otherwise columns are matched
+    positionally, as before. Raises ``ValueError`` on any shape mismatch before a
+    request leaves the process. NaN/missing values are preserved and imputed
+    server-side.
     """
     train_cols = _frame_columns(X_train)
     test_cols = _frame_columns(X_test)
-    if train_cols is not None and test_cols is not None and train_cols != test_cols:
+    if train_cols is not None and test_cols is not None:
         if set(train_cols) != set(test_cols):
             raise ValueError(
                 "X_train and X_test must have the same feature columns; "
                 f"X_train has {train_cols} but X_test has {test_cols}."
             )
-        # Same columns, different order: reorder X_test to match X_train so the
-        # model sees features in a consistent position.
-        X_test = X_test[train_cols]
+        if train_cols != test_cols:
+            # Same columns, different order: reorder X_test to match X_train so
+            # the model sees features in a consistent position.
+            X_test = X_test[train_cols]
+        # One-hot encode any non-numeric columns into a fully numeric matrix,
+        # fitting on X_train and applying the same layout to X_test. Only the
+        # DataFrame/DataFrame case can do this (column names are required).
+        if _has_encodable_columns(X_train):
+            X_train, X_test = _featurize_frames(
+                X_train, X_test, max_categorical_cardinality
+            )
 
     X_train_arr = _coerce_matrix(X_train, "X_train")
     X_test_arr = _coerce_matrix(X_test, "X_test")
@@ -457,6 +551,7 @@ class SynthefyNoriClient:
         task: str = DEFAULT_TASK,
         *,
         as_pandas: bool = False,
+        max_categorical_cardinality: int = _DEFAULT_MAX_CARDINALITY,
         timeout: Optional[float] = None,
         extra_headers: Optional[Dict[str, str]] = None,
     ) -> Union[List[float], pd.Series]:
@@ -466,8 +561,10 @@ class SynthefyNoriClient:
         ----------
         X_train : array-like of shape (n_context, n_features)
             Labeled context rows. Python lists, numpy arrays, or a pandas
-            DataFrame are accepted. All columns must be numeric; missing values
-            (NaN) are allowed and imputed server-side.
+            DataFrame are accepted. In the DataFrame/DataFrame case, non-numeric
+            columns are one-hot encoded for you (see ``X_test`` and
+            ``max_categorical_cardinality``); otherwise all columns must be
+            numeric. Missing values (NaN) are allowed and imputed server-side.
         y_train : array-like of shape (n_context,)
             Target value for each context row. A Python list, numpy array, or a
             pandas Series / single-column DataFrame is accepted.
@@ -475,7 +572,13 @@ class SynthefyNoriClient:
             Query rows to predict. Must have the same number of features as
             ``X_train``. When both ``X_train`` and ``X_test`` are DataFrames,
             ``X_test`` is aligned to ``X_train``'s columns *by name* (column
-            order is irrelevant); a mismatch in the column sets raises.
+            order is irrelevant; a mismatch in the column sets raises), and any
+            non-numeric columns are **one-hot encoded** — fit on ``X_train`` and
+            applied to ``X_test`` — into a fully numeric matrix. Categories come
+            from ``X_train``: a value seen only in ``X_test`` becomes an
+            all-zeros indicator group. Datetime columns and categorical columns
+            with more than ``max_categorical_cardinality`` distinct training
+            values are dropped with a warning.
         task : str, default "regression"
             The prediction task. Currently only ``"regression"`` is supported.
         as_pandas : bool, default False
@@ -484,6 +587,11 @@ class SynthefyNoriClient:
             single-column ``DataFrame`` label, else ``"prediction"``) and indexed
             by ``X_test``'s index when ``X_test`` is a pandas object (so the
             predictions join straight back). Default is the plain ``list``.
+        max_categorical_cardinality : int, default 100
+            Maximum number of distinct training values a non-numeric column may
+            have to be one-hot encoded (DataFrame inputs only). Columns above
+            this cap are dropped with a warning instead of exploding the feature
+            matrix. Ignored when inputs are already numeric.
         timeout : float or None, optional
             Override the client timeout for this request (remote mode only;
             ignored in local mode).
@@ -501,8 +609,10 @@ class SynthefyNoriClient:
         ValueError
             If the input shapes are inconsistent (e.g. ``X_train`` and
             ``y_train`` row counts differ, or ``X_test`` has a different number
-            of features than ``X_train``); if a DataFrame column is non-numeric;
-            or if DataFrame ``X_train``/``X_test`` have mismatched column sets.
+            of features than ``X_train``); if DataFrame ``X_train``/``X_test``
+            have mismatched column sets; if a non-DataFrame input contains
+            non-numeric values; or if one-hot featurization leaves no usable
+            columns.
         ImportError
             In local mode, if the optional ``synthefy-nori`` package is not
             installed (with guidance to ``pip install "synthefy[local]"``).
@@ -516,7 +626,10 @@ class SynthefyNoriClient:
         APIConnectionError
             In remote mode, if a network/connection error occurs.
         """
-        request = _build_nori_request(X_train, y_train, X_test, task)
+        request = _build_nori_request(
+            X_train, y_train, X_test, task,
+            max_categorical_cardinality=max_categorical_cardinality,
+        )
         if self.mode == "local":
             predictions = self._predict_local(request)
         else:

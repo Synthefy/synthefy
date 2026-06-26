@@ -275,18 +275,25 @@ print(predictions)  # -> [<float>, <float>]  (one per X_test row)
 
 `X_train`, `y_train`, and `X_test` accept Python lists, numpy arrays, or pandas
 objects (a `DataFrame` for the feature matrices; a `Series` or single-column
-`DataFrame` for `y_train`). All feature columns must be numeric — encode any
-categorical/text/datetime columns first.
+`DataFrame` for `y_train`). When both `X_train` and `X_test` are DataFrames,
+**non-numeric columns are one-hot encoded for you** — fit on `X_train` and applied
+to `X_test` — so you can pass raw categorical columns directly:
 
 ```python
 import pandas as pd
 
-X_train = pd.DataFrame({"price": [9.99, 4.50, 7.25], "promo": [0, 1, 0]})
+X_train = pd.DataFrame({"price": [9.99, 4.50, 7.25], "region": ["NW", "SE", "NW"]})
 y_train = pd.Series([120.0, 305.0, 180.0])
-X_test  = pd.DataFrame({"promo": [1], "price": [5.00]})  # column order need not match
+X_test  = pd.DataFrame({"region": ["SE"], "price": [5.00]})  # order need not match
 
-predictions = client.predict(X_train, y_train, X_test)
+predictions = client.predict(X_train, y_train, X_test)  # 'region' is one-hot encoded
 ```
+
+Categories come from `X_train`: a value seen only in `X_test` becomes an all-zeros
+indicator group. Datetime columns and categorical columns with more than
+`max_categorical_cardinality` (default 100) distinct training values are dropped
+with a warning. Numeric columns (including `bool`) pass through unchanged. (Plain
+lists/numpy arrays must already be numeric — one-hot needs column names.)
 
 Shapes are validated client-side: `X_train` and `y_train` must have the same
 number of rows, and `X_test` must have the same number of features as `X_train`.
@@ -398,7 +405,11 @@ print(client.mode)  # "local" if synthefy-nori is installed, else "remote"
     apply to remote mode only.
   - Inputs accept Python lists, numpy arrays, or pandas DataFrames/Series.
     Feature columns must be numeric; DataFrame `X_test` is aligned to `X_train`
-    by column name; missing values (NaN) are imputed server-side.
+    by column name; non-numeric columns are one-hot encoded (fit on `X_train`);
+    missing values (NaN) are imputed server-side.
+  - `max_categorical_cardinality` (default 100): non-numeric columns with more
+    distinct training values than this — and datetime columns — are dropped with
+    a warning instead of one-hot encoded.
   - `as_pandas=True` returns a pandas `Series` (named after `y_train`, indexed by
     `X_test`) instead of the default `list[float]`.
 - `mode`: the resolved mode (`"auto"` becomes `"local"`/`"remote"` at
