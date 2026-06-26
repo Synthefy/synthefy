@@ -176,7 +176,9 @@ def _coerce_matrix(arr: MatrixLike, name: str) -> np.ndarray:
         except (ValueError, TypeError) as exc:
             raise ValueError(
                 f"{name} must be a numeric 2D array/list with equal-length rows; "
-                f"got error: {exc}"
+                f"got error: {exc}. If it has categorical/string columns, pass a "
+                "pandas DataFrame (with both X_train and X_test as DataFrames) so "
+                "they can be one-hot encoded."
             ) from exc
     if matrix.ndim != 2:
         raise ValueError(

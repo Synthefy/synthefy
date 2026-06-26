@@ -279,6 +279,19 @@ def test_non_numeric_with_non_dataframe_xtest_still_raises():
         )
 
 
+def test_numpy_string_array_raises_pointing_to_dataframe():
+    # A 2D numpy/list array is single-dtype, so a string column makes the WHOLE
+    # array strings — there are no per-column types to one-hot. We raise and
+    # point the caller to DataFrames (where each column keeps its own dtype).
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="one-hot"):
+        client.predict(
+            X_train=np.array([[1.0, "x"], [2.0, "y"]]),
+            y_train=[1.0, 2.0],
+            X_test=np.array([[3.0, "z"]]),
+        )
+
+
 # --------------------------------------------------------------------------- #
 # as_pandas=True -- return a Series (named after y_train, indexed by X_test)
 # --------------------------------------------------------------------------- #
