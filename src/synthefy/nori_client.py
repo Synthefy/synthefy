@@ -313,10 +313,12 @@ def _featurize_frames(
             numeric_cols.append(col)
         elif pd.api.types.is_datetime64_any_dtype(s):
             dropped.append(f"{col!r} (datetime)")
-        elif pd.api.types.is_timedelta64_dtype(s):
+        elif pd.api.types.is_timedelta64_dtype(s) or isinstance(
+            s.dtype, pd.PeriodDtype
+        ):
             raise ValueError(
-                f"Column {col!r} has unsupported dtype timedelta64; convert it to "
-                "a number (e.g. .dt.total_seconds()) or a string before calling "
+                f"Column {col!r} has unsupported dtype {s.dtype}; convert it to a "
+                "number (e.g. .dt.total_seconds()) or a string before calling "
                 "predict()."
             )
         else:
@@ -412,6 +414,21 @@ def _build_nori_request(
     """
     train_cols = _frame_columns(X_train)
     test_cols = _frame_columns(X_test)
+    if (train_cols is None) != (test_cols is None):
+        # one side is a DataFrame, the other isn't: we can't one-hot/align by
+        # name. Give a targeted error if the DataFrame side has columns to encode.
+        df, df_name, other = (
+            (X_train, "X_train", "X_test")
+            if train_cols is not None
+            else (X_test, "X_test", "X_train")
+        )
+        if _has_encodable_columns(df):
+            raise ValueError(
+                f"{df_name} has non-numeric column(s) to one-hot encode, but "
+                f"{other} is not a DataFrame; pass both X_train and X_test as "
+                "DataFrames with the same columns so they can be aligned and "
+                "encoded (or pre-encode to numeric)."
+            )
     if train_cols is not None and test_cols is not None:
         for cols, nm in ((train_cols, "X_train"), (test_cols, "X_test")):
             dups = sorted({str(c) for c in cols if cols.count(c) > 1})
@@ -446,6 +463,8 @@ def _build_nori_request(
     n_context, n_features = X_train_arr.shape
     if n_context == 0:
         raise ValueError("X_train must contain at least one context row")
+    if n_features == 0:
+        raise ValueError("X_train must contain at least one feature column")
     if y_train_arr.shape[0] != n_context:
         raise ValueError(
             f"X_train has {n_context} rows but y_train has "

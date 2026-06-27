@@ -290,10 +290,13 @@ predictions = client.predict(X_train, y_train, X_test)  # 'region' is one-hot en
 ```
 
 Categories come from `X_train`: a value seen only in `X_test` becomes an all-zeros
-indicator group. Datetime columns and categorical columns with more than
+indicator group, and a missing value (NaN) in a categorical column becomes its own
+one-hot indicator. Datetime columns and categorical columns with more than
 `max_categorical_cardinality` (default 100) distinct training values are dropped
-with a warning. Numeric columns (including `bool`) pass through unchanged. (Plain
-lists/numpy arrays must already be numeric — one-hot needs column names.)
+with a warning; `timedelta` columns are unsupported and raise (convert them to a
+number or string first). Numeric columns (including `bool`) pass through unchanged,
+with NaN imputed server-side. (Plain lists/numpy arrays must already be numeric —
+one-hot needs column names.)
 
 Shapes are validated client-side: `X_train` and `y_train` must have the same
 number of rows, and `X_test` must have the same number of features as `X_train`.

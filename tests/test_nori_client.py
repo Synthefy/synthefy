@@ -406,6 +406,42 @@ def test_one_hot_name_value_collision_raises_clearly():
         client.predict(X_train=Xtr, y_train=[1.0, 2.0], X_test=Xte)
 
 
+def test_period_column_raises_unsupported():
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="unsupported dtype"):
+        client.predict(
+            X_train=pd.DataFrame(
+                {"a": [0.0, 1.0], "p": pd.period_range("2024-01", periods=2, freq="M")}
+            ),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame(
+                {"a": [2.0], "p": pd.period_range("2024-03", periods=1, freq="M")}
+            ),
+        )
+
+
+def test_zero_feature_columns_raises():
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="at least one feature column"):
+        client.predict(
+            X_train=pd.DataFrame(index=[0, 1]),  # 2 rows, 0 columns
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame(index=[0]),
+        )
+
+
+def test_categorical_train_with_array_xtest_points_to_dataframe():
+    # X_train is a DataFrame with a categorical column but X_test is an array:
+    # we can't align/one-hot, so raise a message pointing at passing DataFrames.
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="not a DataFrame"):
+        client.predict(
+            X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": ["x", "y"]}),
+            y_train=[1.0, 2.0],
+            X_test=np.array([[2.0, 0.0]]),
+        )
+
+
 # --------------------------------------------------------------------------- #
 # as_pandas=True -- return a Series (named after y_train, indexed by X_test)
 # --------------------------------------------------------------------------- #
