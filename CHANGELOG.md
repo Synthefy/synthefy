@@ -16,16 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matrix client-side — no server change and no reliance on server-side category
   detection. Numeric columns (including `bool`) pass through unchanged.
 - New `max_categorical_cardinality` argument to `predict` (default `100`):
-  non-numeric columns with more than this many distinct training values — and
-  any datetime columns — are dropped with a `UserWarning` rather than exploding
-  the feature matrix.
+  non-numeric columns with more than this many distinct training values — plus
+  datetime/timedelta columns and columns with no non-missing values — are
+  dropped with a `UserWarning` rather than exploding the feature matrix.
+- `category` columns whose categories are numeric are kept as a numeric
+  magnitude (not one-hot exploded).
 
 ### Changed
 
 - A non-numeric column in a DataFrame `X_train`/`X_test` pair no longer raises;
   it is one-hot encoded (see above). Passing a non-numeric column with a
   non-DataFrame `X_test` still raises, since one-hot alignment needs column
-  names on both sides.
+  names on both sides. A column that is numeric in one of `X_train`/`X_test` but
+  not the other raises a clear type-mismatch `ValueError`.
 
 ## [4.2.0]
 

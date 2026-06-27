@@ -239,22 +239,67 @@ def _has_encodable_columns(frame: pd.DataFrame) -> bool:
     )
 
 
+def _numeric_categories_to_values(frame: pd.DataFrame) -> pd.DataFrame:
+    """Convert ``category`` columns whose categories are numeric back to a plain
+    numeric dtype, so they are kept as magnitudes rather than one-hot exploded
+    (``is_numeric_dtype`` is ``False`` for any ``category`` dtype, even integer
+    ones). Returns ``frame`` unchanged — no copy — when there is nothing to
+    convert.
+    """
+    out = frame
+    for col in frame.columns:
+        s = frame[col]
+        if isinstance(s.dtype, pd.CategoricalDtype) and pd.api.types.is_numeric_dtype(
+            s.cat.categories
+        ):
+            if out is frame:
+                out = frame.copy()
+            out[col] = s.astype(s.cat.categories.dtype)
+    return out
+
+
 def _featurize_frames(
     X_train: pd.DataFrame, X_test: pd.DataFrame, max_cardinality: int
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """One-hot encode non-numeric columns of two aligned frames (fit on train).
 
-    Numeric columns (including ``bool``) pass through unchanged. Datetime columns
-    and categorical columns with more than ``max_cardinality`` distinct *training*
-    values are dropped with a ``UserWarning``. Categories come from ``X_train``:
-    a value seen only in ``X_test`` maps to an all-zeros indicator group, and a
-    category absent from ``X_test`` is still emitted as a zero column — so both
-    frames come out with identical numeric columns and the server receives a
-    fully model-ready matrix (no reliance on server-side category detection).
+    Numeric columns (including ``bool``, and ``category`` columns whose
+    categories are numeric) pass through unchanged. Datetime/timedelta columns,
+    columns with no non-missing values, and categorical columns with more than
+    ``max_cardinality`` distinct *training* values are dropped with a
+    ``UserWarning``. Categories come from ``X_train``: a value seen only in
+    ``X_test`` maps to an all-zeros indicator group, and a category absent from
+    ``X_test`` is still emitted as a zero column — so both frames come out with
+    identical numeric columns and the server receives a fully model-ready matrix
+    (no reliance on server-side category detection).
 
-    ``X_train`` and ``X_test`` must already share the same columns (callers align
-    them by name first). Row order and count are preserved.
+    A column that is numeric in one frame but not the other raises ``ValueError``
+    (rather than failing later with a confusing message). ``X_train`` and
+    ``X_test`` must already share the same columns (callers align them by name
+    first). Row order and count are preserved.
     """
+    # category-of-numeric -> plain numeric, so it is kept as a magnitude (not
+    # one-hot exploded). Applied to both frames before any dtype inspection.
+    X_train = _numeric_categories_to_values(X_train)
+    X_test = _numeric_categories_to_values(X_test)
+
+    # A column must be the same kind (numeric vs not) in both frames; otherwise
+    # featurization would silently mis-handle it (or crash later in the float
+    # cast with a misleading message). Fail loud and specific instead.
+    mismatched = [
+        col
+        for col in X_train.columns
+        if pd.api.types.is_numeric_dtype(X_train[col])
+        != pd.api.types.is_numeric_dtype(X_test[col])
+    ]
+    if mismatched:
+        raise ValueError(
+            f"Column(s) {mismatched} are numeric in one of X_train/X_test but "
+            "not the other; X_train and X_test must have matching column types "
+            "(a common cause is object-dtype numbers, e.g. from read_csv — cast "
+            "them with pd.to_numeric first)."
+        )
+
     numeric_cols: List[Any] = []
     cat_cols: List[Any] = []
     dropped: List[str] = []
@@ -264,17 +309,23 @@ def _featurize_frames(
             numeric_cols.append(col)
         elif pd.api.types.is_datetime64_any_dtype(s):
             dropped.append(f"{col!r} (datetime)")
-        elif s.nunique(dropna=True) > max_cardinality:
-            dropped.append(f"{col!r} (>{max_cardinality} unique values)")
+        elif pd.api.types.is_timedelta64_dtype(s):
+            dropped.append(f"{col!r} (timedelta)")
         else:
-            cat_cols.append(col)
+            n_unique = s.nunique(dropna=True)
+            if n_unique == 0:
+                dropped.append(f"{col!r} (no non-missing values)")
+            elif n_unique > max_cardinality:
+                dropped.append(f"{col!r} (>{max_cardinality} unique values)")
+            else:
+                cat_cols.append(col)
 
     if dropped:
         warnings.warn(
             "Nori one-hot featurization dropped non-encodable column(s): "
             + ", ".join(dropped)
             + ". Encode them yourself (e.g. target/hash encoding) if you need them.",
-            stacklevel=3,
+            stacklevel=4,
         )
 
     if cat_cols:
@@ -300,8 +351,8 @@ def _featurize_frames(
 
     if X_train_feat.shape[1] == 0:
         raise ValueError(
-            "No usable feature columns remain after one-hot featurization (all "
-            "columns were datetime or above the "
+            "No usable feature columns remain after one-hot featurization (every "
+            "column was dropped — temporal, all-missing, or above the "
             f"max_categorical_cardinality={max_cardinality} cap)."
         )
     return X_train_feat, X_test_feat
@@ -340,8 +391,10 @@ def _build_nori_request(
             X_test = X_test[train_cols]
         # One-hot encode any non-numeric columns into a fully numeric matrix,
         # fitting on X_train and applying the same layout to X_test. Only the
-        # DataFrame/DataFrame case can do this (column names are required).
-        if _has_encodable_columns(X_train):
+        # DataFrame/DataFrame case can do this (column names are required). Check
+        # both frames so a column that is non-numeric in only one of them is
+        # caught with a clear error rather than a later cryptic float-cast.
+        if _has_encodable_columns(X_train) or _has_encodable_columns(X_test):
             X_train, X_test = _featurize_frames(
                 X_train, X_test, max_categorical_cardinality
             )

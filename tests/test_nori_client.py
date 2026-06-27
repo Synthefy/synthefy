@@ -292,6 +292,70 @@ def test_numpy_string_array_raises_pointing_to_dataframe():
         )
 
 
+def test_column_numeric_in_train_but_not_test_raises_clearly():
+    # A column numeric in X_train but object-dtype in X_test is caught with a
+    # clear type-mismatch error (not a later cryptic float-cast failure).
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="matching column types"):
+        client.predict(
+            X_train=pd.DataFrame({"b": [1.0, 2.0]}),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame({"b": ["x"]}),  # object dtype, not numeric
+        )
+
+
+def test_numeric_category_dtype_is_treated_as_numeric_not_one_hot():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # must NOT warn / drop / explode
+        client.predict(
+            X_train=pd.DataFrame(
+                {"a": [0.0, 1.0, 2.0],
+                 "r": pd.Categorical([1, 2, 3], categories=[1, 2, 3])}
+            ),
+            y_train=[1.0, 2.0, 3.0],
+            X_test=pd.DataFrame(
+                {"a": [5.0], "r": pd.Categorical([2], categories=[1, 2, 3])}
+            ),
+        )
+    # 'r' kept as a single numeric column (its values), not exploded to r_1/r_2/r_3
+    assert capture["body"]["X_train"] == [[0.0, 1.0], [1.0, 2.0], [2.0, 3.0]]
+    assert capture["body"]["X_test"] == [[5.0, 2.0]]
+
+
+def test_all_missing_categorical_column_dropped_with_warning():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    with pytest.warns(UserWarning, match="no non-missing"):
+        client.predict(
+            X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": [None, None]}),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame({"a": [2.0], "cat": [None]}),
+        )
+    assert capture["body"]["X_train"] == [[0.0], [1.0]]
+
+
+def test_timedelta_column_is_dropped_with_warning():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    with pytest.warns(UserWarning, match="timedelta"):
+        client.predict(
+            X_train=pd.DataFrame(
+                {"a": [0.0, 1.0], "d": pd.to_timedelta(["1 days", "2 days"])}
+            ),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame({"a": [2.0], "d": pd.to_timedelta(["3 days"])}),
+        )
+    assert capture["body"]["X_train"] == [[0.0], [1.0]]
+
+
 # --------------------------------------------------------------------------- #
 # as_pandas=True -- return a Series (named after y_train, indexed by X_test)
 # --------------------------------------------------------------------------- #
