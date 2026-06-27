@@ -11,16 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `SynthefyNoriClient.predict` now **one-hot encodes non-numeric columns** when
   both `X_train` and `X_test` are DataFrames, instead of raising. The encoding is
-  fit on `X_train` and applied to `X_test` (categories seen only in `X_test`
-  become an all-zeros indicator group), producing a fully numeric, model-ready
+  fit on `X_train` and applied to `X_test` (a category seen only in `X_test`
+  becomes an all-zeros indicator group), producing a fully numeric, model-ready
   matrix client-side — no server change and no reliance on server-side category
-  detection. Numeric columns (including `bool`) pass through unchanged.
+  detection. Numeric columns (including `bool`) pass through unchanged. A missing
+  value (NaN) in a categorical column gets its own one-hot indicator
+  (`dummy_na`), kept only when missingness actually occurs.
 - New `max_categorical_cardinality` argument to `predict` (default `100`):
   non-numeric columns with more than this many distinct training values — plus
-  datetime/timedelta columns and columns with no non-missing values — are
-  dropped with a `UserWarning` rather than exploding the feature matrix.
+  datetime columns and columns with no non-missing values — are dropped with a
+  `UserWarning` rather than exploding the feature matrix.
 - `category` columns whose categories are numeric are kept as a numeric
-  magnitude (not one-hot exploded).
+  magnitude (not one-hot exploded), NaN-safe for integer categories.
 
 ### Changed
 
@@ -28,7 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is one-hot encoded (see above). Passing a non-numeric column with a
   non-DataFrame `X_test` still raises, since one-hot alignment needs column
   names on both sides. A column that is numeric in one of `X_train`/`X_test` but
-  not the other raises a clear type-mismatch `ValueError`.
+  not the other raises a clear type-mismatch `ValueError`; duplicate column
+  names, name/value one-hot collisions, and `timedelta` columns also raise with
+  actionable messages (convert timedeltas to a number or string first).
 
 ## [4.2.0]
 

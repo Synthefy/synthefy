@@ -254,7 +254,9 @@ def _numeric_categories_to_values(frame: pd.DataFrame) -> pd.DataFrame:
         ):
             if out is frame:
                 out = frame.copy()
-            out[col] = s.astype(s.cat.categories.dtype)
+            # via to_numeric so a missing value in an *integer*-category column
+            # promotes to float (NaN) instead of raising "Cannot convert NaN".
+            out[col] = pd.to_numeric(s.astype(object))
     return out
 
 
@@ -264,14 +266,16 @@ def _featurize_frames(
     """One-hot encode non-numeric columns of two aligned frames (fit on train).
 
     Numeric columns (including ``bool``, and ``category`` columns whose
-    categories are numeric) pass through unchanged. Datetime/timedelta columns,
-    columns with no non-missing values, and categorical columns with more than
+    categories are numeric) pass through unchanged. Datetime columns, columns
+    with no non-missing values, and categorical columns with more than
     ``max_cardinality`` distinct *training* values are dropped with a
-    ``UserWarning``. Categories come from ``X_train``: a value seen only in
-    ``X_test`` maps to an all-zeros indicator group, and a category absent from
-    ``X_test`` is still emitted as a zero column — so both frames come out with
-    identical numeric columns and the server receives a fully model-ready matrix
-    (no reliance on server-side category detection).
+    ``UserWarning``; ``timedelta`` columns are unsupported and raise. Categories
+    come from ``X_train``: a value seen only in ``X_test`` maps to an all-zeros
+    indicator group, a category absent from ``X_test`` is still emitted as a zero
+    column, and a missing value (in either frame) gets its own indicator column
+    (``dummy_na=True``, but the indicator is dropped when no row is missing) — so
+    both frames come out with identical numeric columns and the server receives a
+    fully model-ready matrix (no reliance on server-side category detection).
 
     A column that is numeric in one frame but not the other raises ``ValueError``
     (rather than failing later with a confusing message). ``X_train`` and
@@ -310,7 +314,11 @@ def _featurize_frames(
         elif pd.api.types.is_datetime64_any_dtype(s):
             dropped.append(f"{col!r} (datetime)")
         elif pd.api.types.is_timedelta64_dtype(s):
-            dropped.append(f"{col!r} (timedelta)")
+            raise ValueError(
+                f"Column {col!r} has unsupported dtype timedelta64; convert it to "
+                "a number (e.g. .dt.total_seconds()) or a string before calling "
+                "predict()."
+            )
         else:
             n_unique = s.nunique(dropna=True)
             if n_unique == 0:
@@ -329,12 +337,31 @@ def _featurize_frames(
         )
 
     if cat_cols:
+        # dummy_na=True gives missing values their own indicator column, so NaN is
+        # a distinct category rather than silently all-zeros. get_dummies always
+        # emits a NaN column per categorical; the all-zero ones (no missingness in
+        # either frame) are dropped below so we only pay for it when it matters.
         train_d = pd.get_dummies(
-            X_train[cat_cols].astype(object), columns=cat_cols, dtype=np.uint8
+            X_train[cat_cols].astype(object), columns=cat_cols,
+            dummy_na=True, dtype=np.uint8,
         )
+        if train_d.columns.has_duplicates:
+            raise ValueError(
+                "One-hot encoding produced duplicate column names — a column name "
+                "and value collide under '<column>_<value>' naming. Rename the "
+                "offending column(s) before calling predict()."
+            )
         test_d = pd.get_dummies(
-            X_test[cat_cols].astype(object), columns=cat_cols, dtype=np.uint8
+            X_test[cat_cols].astype(object), columns=cat_cols,
+            dummy_na=True, dtype=np.uint8,
         ).reindex(columns=train_d.columns, fill_value=0)
+        dead = [
+            c for c in train_d.columns
+            if not train_d[c].any() and not test_d[c].any()
+        ]
+        if dead:
+            train_d = train_d.drop(columns=dead)
+            test_d = test_d.drop(columns=dead)
         X_train_feat = pd.concat(
             [X_train[numeric_cols].reset_index(drop=True),
              train_d.reset_index(drop=True)],
@@ -345,6 +372,12 @@ def _featurize_frames(
              test_d.reset_index(drop=True)],
             axis=1,
         )
+        if X_train_feat.columns.has_duplicates:
+            raise ValueError(
+                "Featurized columns are not unique — a numeric column name "
+                "collides with a generated one-hot column name. Rename the "
+                "offending column(s) before calling predict()."
+            )
     else:
         X_train_feat = X_train[numeric_cols].reset_index(drop=True)
         X_test_feat = X_test[numeric_cols].reset_index(drop=True)
@@ -380,6 +413,13 @@ def _build_nori_request(
     train_cols = _frame_columns(X_train)
     test_cols = _frame_columns(X_test)
     if train_cols is not None and test_cols is not None:
+        for cols, nm in ((train_cols, "X_train"), (test_cols, "X_test")):
+            dups = sorted({str(c) for c in cols if cols.count(c) > 1})
+            if dups:
+                raise ValueError(
+                    f"{nm} has duplicate column name(s) {dups}; column names must "
+                    "be unique (duplicates break by-name alignment and encoding)."
+                )
         if set(train_cols) != set(test_cols):
             raise ValueError(
                 "X_train and X_test must have the same feature columns; "
@@ -619,7 +659,9 @@ class SynthefyNoriClient:
             DataFrame are accepted. In the DataFrame/DataFrame case, non-numeric
             columns are one-hot encoded for you (see ``X_test`` and
             ``max_categorical_cardinality``); otherwise all columns must be
-            numeric. Missing values (NaN) are allowed and imputed server-side.
+            numeric. Missing values are allowed: NaN in a numeric column is
+            imputed server-side; NaN in a categorical column becomes its own
+            one-hot indicator.
         y_train : array-like of shape (n_context,)
             Target value for each context row. A Python list, numpy array, or a
             pandas Series / single-column DataFrame is accepted.
@@ -631,9 +673,11 @@ class SynthefyNoriClient:
             non-numeric columns are **one-hot encoded** — fit on ``X_train`` and
             applied to ``X_test`` — into a fully numeric matrix. Categories come
             from ``X_train``: a value seen only in ``X_test`` becomes an
-            all-zeros indicator group. Datetime columns and categorical columns
-            with more than ``max_categorical_cardinality`` distinct training
-            values are dropped with a warning.
+            all-zeros indicator group, and a missing value gets its own
+            indicator column. Datetime columns and categorical columns with more
+            than ``max_categorical_cardinality`` distinct training values are
+            dropped with a warning; ``timedelta`` columns are unsupported and
+            raise (convert them to a number or string first).
         task : str, default "regression"
             The prediction task. Currently only ``"regression"`` is supported.
         as_pandas : bool, default False
@@ -665,9 +709,11 @@ class SynthefyNoriClient:
             If the input shapes are inconsistent (e.g. ``X_train`` and
             ``y_train`` row counts differ, or ``X_test`` has a different number
             of features than ``X_train``); if DataFrame ``X_train``/``X_test``
-            have mismatched column sets; if a non-DataFrame input contains
-            non-numeric values; or if one-hot featurization leaves no usable
-            columns.
+            have mismatched column sets or duplicate column names; if a column is
+            numeric in one of ``X_train``/``X_test`` but not the other; if a
+            column has unsupported ``timedelta`` dtype; if a non-DataFrame input
+            contains non-numeric values; or if one-hot featurization leaves no
+            usable columns.
         ImportError
             In local mode, if the optional ``synthefy-nori`` package is not
             installed (with guidance to ``pip install "synthefy[local]"``).

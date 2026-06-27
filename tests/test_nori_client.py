@@ -340,12 +340,9 @@ def test_all_missing_categorical_column_dropped_with_warning():
     assert capture["body"]["X_train"] == [[0.0], [1.0]]
 
 
-def test_timedelta_column_is_dropped_with_warning():
-    capture: Dict = {}
+def test_timedelta_column_raises_unsupported():
     client = SynthefyNoriClient(api_key="test-key")
-    _attach_mock(client, _ok_handler([1.0], capture))
-
-    with pytest.warns(UserWarning, match="timedelta"):
+    with pytest.raises(ValueError, match="timedelta"):
         client.predict(
             X_train=pd.DataFrame(
                 {"a": [0.0, 1.0], "d": pd.to_timedelta(["1 days", "2 days"])}
@@ -353,7 +350,60 @@ def test_timedelta_column_is_dropped_with_warning():
             y_train=[1.0, 2.0],
             X_test=pd.DataFrame({"a": [2.0], "d": pd.to_timedelta(["3 days"])}),
         )
-    assert capture["body"]["X_train"] == [[0.0], [1.0]]
+
+
+def test_nan_in_categorical_gets_its_own_indicator_column():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0, 2.0], "cat": ["x", None, "y"]}),
+        y_train=[1.0, 2.0, 3.0],
+        X_test=pd.DataFrame({"a": [5.0], "cat": ["x"]}),
+    )
+    # columns: a, cat_x, cat_y, cat_nan (the missing row -> its own indicator)
+    assert capture["body"]["X_train"] == [
+        [0.0, 1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 1.0],
+        [2.0, 0.0, 1.0, 0.0],
+    ]
+    assert capture["body"]["X_test"] == [[5.0, 1.0, 0.0, 0.0]]
+
+
+def test_integer_category_with_nan_does_not_crash():
+    # Regression: demoting an int-category column to numeric must not choke on
+    # NaN (it promotes to float and the NaN is forwarded for server imputation).
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    client.predict(
+        X_train=pd.DataFrame(
+            {"r": pd.Categorical([1, 2, None], categories=[1, 2, 3])}
+        ),
+        y_train=[1.0, 2.0, 3.0],
+        X_test=pd.DataFrame({"r": pd.Categorical([2], categories=[1, 2, 3])}),
+    )
+    sent = capture["body"]["X_train"]
+    assert sent[0] == [1.0] and sent[1] == [2.0]
+    assert math.isnan(sent[2][0])  # NaN forwarded, not crashed
+
+
+def test_duplicate_column_names_raise():
+    client = SynthefyNoriClient(api_key="test-key")
+    df = pd.DataFrame([[0.0, 1.0, 2.0]], columns=["a", "a", "b"])
+    with pytest.raises(ValueError, match="duplicate column name"):
+        client.predict(X_train=df, y_train=[1.0], X_test=df)
+
+
+def test_one_hot_name_value_collision_raises_clearly():
+    # column 'a' value 'b_x' and column 'a_b' value 'x' both -> dummy 'a_b_x'
+    client = SynthefyNoriClient(api_key="test-key")
+    Xtr = pd.DataFrame({"a": ["b_x", "b_x"], "a_b": ["x", "y"]})
+    Xte = pd.DataFrame({"a": ["b_x"], "a_b": ["x"]})
+    with pytest.raises(ValueError, match="duplicate column names"):
+        client.predict(X_train=Xtr, y_train=[1.0, 2.0], X_test=Xte)
 
 
 # --------------------------------------------------------------------------- #
