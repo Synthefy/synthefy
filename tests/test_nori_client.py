@@ -267,18 +267,6 @@ def test_all_numeric_dataframe_is_not_featurized():
     assert capture["body"]["X_train"] == [[0.0, 1.0], [1.0, 0.0]]
 
 
-def test_non_numeric_with_non_dataframe_xtest_still_raises():
-    # Featurization needs both sides as DataFrames (column names). If X_test is
-    # a bare array, we can't one-hot consistently -> the numeric-only guard fires.
-    client = SynthefyNoriClient(api_key="test-key")
-    with pytest.raises(ValueError, match="non-numeric"):
-        client.predict(
-            X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": ["x", "y"]}),
-            y_train=[1.0, 2.0],
-            X_test=np.array([[2.0, 0.0]]),
-        )
-
-
 def test_numpy_string_array_raises_pointing_to_dataframe():
     # A 2D numpy/list array is single-dtype, so a string column makes the WHOLE
     # array strings — there are no per-column types to one-hot. We raise and
@@ -440,6 +428,35 @@ def test_categorical_train_with_array_xtest_points_to_dataframe():
             y_train=[1.0, 2.0],
             X_test=np.array([[2.0, 0.0]]),
         )
+
+
+def test_literal_nan_string_category_is_not_treated_as_missing():
+    # A real category whose value is the string "nan" (no actual NaN) must encode
+    # cleanly and NOT trip the duplicate-column guard against the dummy_na column.
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": ["nan", "x"]}),
+        y_train=[1.0, 2.0],
+        X_test=pd.DataFrame({"a": [2.0], "cat": ["nan"]}),
+    )
+    # columns: a, cat_nan, cat_x  — no NaN-indicator column, no error
+    assert capture["body"]["X_train"] == [[0.0, 1.0, 0.0], [1.0, 0.0, 1.0]]
+    assert capture["body"]["X_test"] == [[2.0, 1.0, 0.0]]
+
+
+def test_nonpositive_cardinality_cap_raises():
+    client = SynthefyNoriClient(api_key="test-key")
+    for cap in (0, -5):
+        with pytest.raises(ValueError, match="positive integer"):
+            client.predict(
+                X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": ["x", "y"]}),
+                y_train=[1.0, 2.0],
+                X_test=pd.DataFrame({"a": [2.0], "cat": ["x"]}),
+                max_categorical_cardinality=cap,
+            )
 
 
 # --------------------------------------------------------------------------- #

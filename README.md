@@ -295,8 +295,11 @@ one-hot indicator. Datetime columns and categorical columns with more than
 `max_categorical_cardinality` (default 100) distinct training values are dropped
 with a warning; `timedelta` columns are unsupported and raise (convert them to a
 number or string first). Numeric columns (including `bool`) pass through unchanged,
-with NaN imputed server-side. (Plain lists/numpy arrays must already be numeric —
-one-hot needs column names.)
+with NaN imputed server-side. Any **object-dtype** column is treated as categorical
+(including numeric-looking strings such as IDs or zip codes, and object date
+values) — cast genuine numeric columns to a numeric dtype if you want them kept as
+magnitudes. (Plain lists/numpy arrays must already be numeric — one-hot needs
+column names.)
 
 Shapes are validated client-side: `X_train` and `y_train` must have the same
 number of rows, and `X_test` must have the same number of features as `X_train`.

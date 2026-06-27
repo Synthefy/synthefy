@@ -254,9 +254,10 @@ def _numeric_categories_to_values(frame: pd.DataFrame) -> pd.DataFrame:
         ):
             if out is frame:
                 out = frame.copy()
-            # via to_numeric so a missing value in an *integer*-category column
-            # promotes to float (NaN) instead of raising "Cannot convert NaN".
-            out[col] = pd.to_numeric(s.astype(object))
+            # cast to float (not the categories' dtype) so a missing value in an
+            # *integer*-category column promotes to NaN instead of raising
+            # "Cannot convert NaN to integer".
+            out[col] = s.astype("float64")
     return out
 
 
@@ -341,12 +342,15 @@ def _featurize_frames(
     if cat_cols:
         # dummy_na=True gives missing values their own indicator column, so NaN is
         # a distinct category rather than silently all-zeros. get_dummies always
-        # emits a NaN column per categorical; the all-zero ones (no missingness in
-        # either frame) are dropped below so we only pay for it when it matters.
+        # emits a NaN column per categorical; drop columns that are all-zero in
+        # TRAIN — that removes the dead NaN-indicator when a column has no missing
+        # rows (so a legitimate literal "nan" value column doesn't collide with
+        # it). Done positionally so a transient duplicate label can't break it.
         train_d = pd.get_dummies(
             X_train[cat_cols].astype(object), columns=cat_cols,
             dummy_na=True, dtype=np.uint8,
         )
+        train_d = train_d.loc[:, (train_d.to_numpy() != 0).any(axis=0)]
         if train_d.columns.has_duplicates:
             raise ValueError(
                 "One-hot encoding produced duplicate column names — a column name "
@@ -356,14 +360,11 @@ def _featurize_frames(
         test_d = pd.get_dummies(
             X_test[cat_cols].astype(object), columns=cat_cols,
             dummy_na=True, dtype=np.uint8,
-        ).reindex(columns=train_d.columns, fill_value=0)
-        dead = [
-            c for c in train_d.columns
-            if not train_d[c].any() and not test_d[c].any()
-        ]
-        if dead:
-            train_d = train_d.drop(columns=dead)
-            test_d = test_d.drop(columns=dead)
+        )
+        # Drop test all-zero columns too (e.g. the dummy_na column when X_test has
+        # no missing rows) so test_d has no duplicate label before reindex.
+        test_d = test_d.loc[:, (test_d.to_numpy() != 0).any(axis=0)]
+        test_d = test_d.reindex(columns=train_d.columns, fill_value=0)
         X_train_feat = pd.concat(
             [X_train[numeric_cols].reset_index(drop=True),
              train_d.reset_index(drop=True)],
@@ -412,6 +413,11 @@ def _build_nori_request(
     request leaves the process. NaN/missing values are preserved and imputed
     server-side.
     """
+    if max_categorical_cardinality < 1:
+        raise ValueError(
+            "max_categorical_cardinality must be a positive integer; got "
+            f"{max_categorical_cardinality}."
+        )
     train_cols = _frame_columns(X_train)
     test_cols = _frame_columns(X_test)
     if (train_cols is None) != (test_cols is None):
@@ -431,8 +437,9 @@ def _build_nori_request(
             )
     if train_cols is not None and test_cols is not None:
         for cols, nm in ((train_cols, "X_train"), (test_cols, "X_test")):
-            dups = sorted({str(c) for c in cols if cols.count(c) > 1})
-            if dups:
+            idx = pd.Index(cols)
+            if idx.has_duplicates:
+                dups = sorted({str(c) for c in idx[idx.duplicated()]})
                 raise ValueError(
                     f"{nm} has duplicate column name(s) {dups}; column names must "
                     "be unique (duplicates break by-name alignment and encoding)."
@@ -451,7 +458,11 @@ def _build_nori_request(
         # DataFrame/DataFrame case can do this (column names are required). Check
         # both frames so a column that is non-numeric in only one of them is
         # caught with a clear error rather than a later cryptic float-cast.
-        if _has_encodable_columns(X_train) or _has_encodable_columns(X_test):
+        if (
+            len(X_train)
+            and len(X_test)
+            and (_has_encodable_columns(X_train) or _has_encodable_columns(X_test))
+        ):
             X_train, X_test = _featurize_frames(
                 X_train, X_test, max_categorical_cardinality
             )
