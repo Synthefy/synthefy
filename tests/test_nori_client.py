@@ -8,6 +8,7 @@ the optional ``synthefy-nori`` package is installed.
 import builtins
 import json
 import math
+import warnings
 from typing import Callable, Dict, List
 
 import httpx
@@ -164,14 +165,298 @@ def test_dataframe_column_set_mismatch_raises():
         )
 
 
-def test_dataframe_non_numeric_column_raises():
+# --------------------------------------------------------------------------- #
+# One-hot featurization of non-numeric DataFrame columns (fit on X_train)
+# --------------------------------------------------------------------------- #
+
+
+def test_non_numeric_columns_are_one_hot_encoded():
+    capture: Dict = {}
     client = SynthefyNoriClient(api_key="test-key")
-    with pytest.raises(ValueError, match="non-numeric"):
+    _attach_mock(client, _ok_handler([5.0], capture))
+
+    out = client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": ["x", "y"]}),
+        y_train=[1.0, 2.0],
+        # 'z' is unseen in training -> its indicator group is all zeros.
+        X_test=pd.DataFrame({"a": [2.0], "cat": ["z"]}),
+    )
+
+    assert out == [5.0]
+    # columns: a, cat_x, cat_y  (numerics first, then sorted one-hot groups)
+    assert capture["body"]["X_train"] == [[0.0, 1.0, 0.0], [1.0, 0.0, 1.0]]
+    assert capture["body"]["X_test"] == [[2.0, 0.0, 0.0]]
+
+
+def test_one_hot_train_category_absent_in_test_is_kept_as_zero_column():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([9.0], capture))
+
+    client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0, 2.0], "cat": ["x", "y", "z"]}),
+        y_train=[1.0, 2.0, 3.0],
+        X_test=pd.DataFrame({"a": [5.0], "cat": ["x"]}),
+    )
+
+    # train has 3 categories -> cat_x, cat_y, cat_z; test row 'x' -> [1,0,0]
+    assert capture["body"]["X_test"] == [[5.0, 1.0, 0.0, 0.0]]
+
+
+def test_high_cardinality_column_is_dropped_with_warning():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    with pytest.warns(UserWarning, match="unique values"):
+        client.predict(
+            X_train=pd.DataFrame({"a": [0.0, 1.0, 2.0], "hc": ["p", "q", "r"]}),
+            y_train=[1.0, 2.0, 3.0],
+            X_test=pd.DataFrame({"a": [3.0], "hc": ["p"]}),
+            max_categorical_cardinality=2,  # 'hc' has 3 uniques -> dropped
+        )
+
+    assert capture["body"]["X_train"] == [[0.0], [1.0], [2.0]]
+    assert capture["body"]["X_test"] == [[3.0]]
+
+
+def test_datetime_column_is_dropped_with_warning():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    with pytest.warns(UserWarning, match="datetime"):
+        client.predict(
+            X_train=pd.DataFrame(
+                {"a": [0.0, 1.0], "d": pd.to_datetime(["2024-01-01", "2024-01-02"])}
+            ),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame({"a": [2.0], "d": pd.to_datetime(["2024-01-03"])}),
+        )
+
+    assert capture["body"]["X_train"] == [[0.0], [1.0]]
+
+
+def test_bool_columns_pass_through_as_numeric():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    # bool is numeric (is_numeric_dtype) -> not one-hot; True/False -> 1.0/0.0
+    client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0], "flag": [True, False]}),
+        y_train=[1.0, 2.0],
+        X_test=pd.DataFrame({"a": [2.0], "flag": [True]}),
+    )
+    assert capture["body"]["X_train"] == [[0.0, 1.0], [1.0, 0.0]]
+    assert capture["body"]["X_test"] == [[2.0, 1.0]]
+
+
+def test_all_numeric_dataframe_is_not_featurized():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any featurization warning would fail
+        client.predict(
+            X_train=pd.DataFrame({"a": [0.0, 1.0], "b": [1.0, 0.0]}),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame({"a": [2.0], "b": [2.0]}),
+        )
+    assert capture["body"]["X_train"] == [[0.0, 1.0], [1.0, 0.0]]
+
+
+def test_numpy_string_array_raises_pointing_to_dataframe():
+    # A 2D numpy/list array is single-dtype, so a string column makes the WHOLE
+    # array strings — there are no per-column types to one-hot. We raise and
+    # point the caller to DataFrames (where each column keeps its own dtype).
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="one-hot"):
+        client.predict(
+            X_train=np.array([[1.0, "x"], [2.0, "y"]]),
+            y_train=[1.0, 2.0],
+            X_test=np.array([[3.0, "z"]]),
+        )
+
+
+def test_column_numeric_in_train_but_not_test_raises_clearly():
+    # A column numeric in X_train but object-dtype in X_test is caught with a
+    # clear type-mismatch error (not a later cryptic float-cast failure).
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="matching column types"):
+        client.predict(
+            X_train=pd.DataFrame({"b": [1.0, 2.0]}),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame({"b": ["x"]}),  # object dtype, not numeric
+        )
+
+
+def test_numeric_category_dtype_is_treated_as_numeric_not_one_hot():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # must NOT warn / drop / explode
+        client.predict(
+            X_train=pd.DataFrame(
+                {"a": [0.0, 1.0, 2.0],
+                 "r": pd.Categorical([1, 2, 3], categories=[1, 2, 3])}
+            ),
+            y_train=[1.0, 2.0, 3.0],
+            X_test=pd.DataFrame(
+                {"a": [5.0], "r": pd.Categorical([2], categories=[1, 2, 3])}
+            ),
+        )
+    # 'r' kept as a single numeric column (its values), not exploded to r_1/r_2/r_3
+    assert capture["body"]["X_train"] == [[0.0, 1.0], [1.0, 2.0], [2.0, 3.0]]
+    assert capture["body"]["X_test"] == [[5.0, 2.0]]
+
+
+def test_all_missing_categorical_column_dropped_with_warning():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    with pytest.warns(UserWarning, match="no non-missing"):
+        client.predict(
+            X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": [None, None]}),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame({"a": [2.0], "cat": [None]}),
+        )
+    assert capture["body"]["X_train"] == [[0.0], [1.0]]
+
+
+def test_timedelta_column_raises_unsupported():
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="timedelta"):
+        client.predict(
+            X_train=pd.DataFrame(
+                {"a": [0.0, 1.0], "d": pd.to_timedelta(["1 days", "2 days"])}
+            ),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame({"a": [2.0], "d": pd.to_timedelta(["3 days"])}),
+        )
+
+
+def test_nan_in_categorical_gets_its_own_indicator_column():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0, 2.0], "cat": ["x", None, "y"]}),
+        y_train=[1.0, 2.0, 3.0],
+        X_test=pd.DataFrame({"a": [5.0], "cat": ["x"]}),
+    )
+    # columns: a, cat_x, cat_y, cat_nan (the missing row -> its own indicator)
+    assert capture["body"]["X_train"] == [
+        [0.0, 1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 1.0],
+        [2.0, 0.0, 1.0, 0.0],
+    ]
+    assert capture["body"]["X_test"] == [[5.0, 1.0, 0.0, 0.0]]
+
+
+def test_integer_category_with_nan_does_not_crash():
+    # Regression: demoting an int-category column to numeric must not choke on
+    # NaN (it promotes to float and the NaN is forwarded for server imputation).
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    client.predict(
+        X_train=pd.DataFrame(
+            {"r": pd.Categorical([1, 2, None], categories=[1, 2, 3])}
+        ),
+        y_train=[1.0, 2.0, 3.0],
+        X_test=pd.DataFrame({"r": pd.Categorical([2], categories=[1, 2, 3])}),
+    )
+    sent = capture["body"]["X_train"]
+    assert sent[0] == [1.0] and sent[1] == [2.0]
+    assert math.isnan(sent[2][0])  # NaN forwarded, not crashed
+
+
+def test_duplicate_column_names_raise():
+    client = SynthefyNoriClient(api_key="test-key")
+    df = pd.DataFrame([[0.0, 1.0, 2.0]], columns=["a", "a", "b"])
+    with pytest.raises(ValueError, match="duplicate column name"):
+        client.predict(X_train=df, y_train=[1.0], X_test=df)
+
+
+def test_one_hot_name_value_collision_raises_clearly():
+    # column 'a' value 'b_x' and column 'a_b' value 'x' both -> dummy 'a_b_x'
+    client = SynthefyNoriClient(api_key="test-key")
+    Xtr = pd.DataFrame({"a": ["b_x", "b_x"], "a_b": ["x", "y"]})
+    Xte = pd.DataFrame({"a": ["b_x"], "a_b": ["x"]})
+    with pytest.raises(ValueError, match="duplicate column names"):
+        client.predict(X_train=Xtr, y_train=[1.0, 2.0], X_test=Xte)
+
+
+def test_period_column_raises_unsupported():
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="unsupported dtype"):
+        client.predict(
+            X_train=pd.DataFrame(
+                {"a": [0.0, 1.0], "p": pd.period_range("2024-01", periods=2, freq="M")}
+            ),
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame(
+                {"a": [2.0], "p": pd.period_range("2024-03", periods=1, freq="M")}
+            ),
+        )
+
+
+def test_zero_feature_columns_raises():
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="at least one feature column"):
+        client.predict(
+            X_train=pd.DataFrame(index=[0, 1]),  # 2 rows, 0 columns
+            y_train=[1.0, 2.0],
+            X_test=pd.DataFrame(index=[0]),
+        )
+
+
+def test_categorical_train_with_array_xtest_points_to_dataframe():
+    # X_train is a DataFrame with a categorical column but X_test is an array:
+    # we can't align/one-hot, so raise a message pointing at passing DataFrames.
+    client = SynthefyNoriClient(api_key="test-key")
+    with pytest.raises(ValueError, match="not a DataFrame"):
         client.predict(
             X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": ["x", "y"]}),
             y_train=[1.0, 2.0],
-            X_test=pd.DataFrame({"a": [2.0], "cat": ["z"]}),
+            X_test=np.array([[2.0, 0.0]]),
         )
+
+
+def test_literal_nan_string_category_is_not_treated_as_missing():
+    # A real category whose value is the string "nan" (no actual NaN) must encode
+    # cleanly and NOT trip the duplicate-column guard against the dummy_na column.
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": ["nan", "x"]}),
+        y_train=[1.0, 2.0],
+        X_test=pd.DataFrame({"a": [2.0], "cat": ["nan"]}),
+    )
+    # columns: a, cat_nan, cat_x  — no NaN-indicator column, no error
+    assert capture["body"]["X_train"] == [[0.0, 1.0, 0.0], [1.0, 0.0, 1.0]]
+    assert capture["body"]["X_test"] == [[2.0, 1.0, 0.0]]
+
+
+def test_nonpositive_cardinality_cap_raises():
+    client = SynthefyNoriClient(api_key="test-key")
+    for cap in (0, -5):
+        with pytest.raises(ValueError, match="positive integer"):
+            client.predict(
+                X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": ["x", "y"]}),
+                y_train=[1.0, 2.0],
+                X_test=pd.DataFrame({"a": [2.0], "cat": ["x"]}),
+                max_categorical_cardinality=cap,
+            )
 
 
 # --------------------------------------------------------------------------- #
