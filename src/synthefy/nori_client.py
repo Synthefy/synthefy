@@ -870,6 +870,12 @@ class SynthefyNoriClient:
         response: Optional[httpx.Response] = None
         attempts = self.max_retries + 1
         for attempt in range(attempts):
+            # Reset per attempt so the "no more retries" block below reflects the
+            # final attempt only. Otherwise an exception from an earlier attempt
+            # (e.g. a transient connection error) would be re-raised in place of
+            # the true final error (e.g. a 5xx that should map to a server error).
+            last_exc = None
+            response = None
             try:
                 response = self.client.post(
                     endpoint,

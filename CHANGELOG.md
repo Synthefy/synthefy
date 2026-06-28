@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.2]
+
+### Fixed
+
+- `SynthefyNoriClient` remote retries no longer surface a stale earlier-attempt
+  exception. When an earlier attempt raised a transient error (e.g. a connection
+  error or timeout) but the final attempt returned a retryable response (e.g. a
+  5xx), the client raised the stale `APIConnectionError`/`APITimeoutError`
+  instead of the true final error. `_post_with_retries` now resets its per-attempt
+  state each iteration, so the final attempt's outcome is what's raised (e.g. a
+  5xx maps to `InternalServerError`).
+
 ## [4.2.1]
 
 ### Added

@@ -763,6 +763,27 @@ def test_exhausted_retries_raise_internal_server_error(monkeypatch):
         client.predict(X_train=[[1.0]], y_train=[1.0], X_test=[[2.0]])
 
 
+def test_final_error_wins_over_stale_earlier_attempt(monkeypatch):
+    # A transient connection error on attempt 0 followed by a retryable 5xx on the
+    # final attempt must surface the FINAL error (InternalServerError), not the
+    # stale APIConnectionError from the earlier attempt.
+    monkeypatch.setattr("synthefy.nori_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("transient")
+        return httpx.Response(503, json={"error": "down"})
+
+    client = SynthefyNoriClient(api_key="test-key", max_retries=1)
+    _attach_mock(client, handler)
+
+    with pytest.raises(InternalServerError):
+        client.predict(X_train=[[1.0]], y_train=[1.0], X_test=[[2.0]])
+    assert calls["n"] == 2
+
+
 # --------------------------------------------------------------------------- #
 # Pydantic models
 # --------------------------------------------------------------------------- #
