@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Documented the Nori model family in code: `synthefy.NORI` (the `synthefy/nori`
+  gateway slug, also the default `model=`) and `synthefy.KNOWN_NORI_MODELS`, the
+  canonical list of recognized Nori model slugs. `SynthefyNoriClient(model=...)`
+  still accepts any string, so a newly published model works before an SDK bump.
+
+### Fixed
+
+- `DEDICATED_BASE_URL` now points at the current Baseten model id (`qrj00rr3`);
+  it previously referenced a stale id (`3m5j7y9w`). This only affects the
+  non-default dedicated-deployment path; the gateway (default) path was
+  unaffected.
+
 ## [4.2.2]
 
 ### Fixed

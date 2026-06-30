@@ -41,11 +41,23 @@ from synthefy.api_client import (
 # Gateway endpoint (default): routes to the model by name, body carries "model".
 GATEWAY_BASE_URL = "https://inference.baseten.co"
 GATEWAY_ENDPOINT = "/predict"
-GATEWAY_MODEL = "synthefy/nori"
+
+# Nori model family — Baseten gateway slugs. The gateway routes a request to a
+# model by this slug (sent in the request body as "model") and meters usage
+# under it. Today the family has a single public model; more flavours (e.g.
+# larger or reasoning variants) are planned and will be added here as they ship.
+# "synthefy/nori-dev" is an internal development deployment and is intentionally
+# not listed. ``model=`` still accepts any string, so a newly published slug
+# works before this client is updated.
+NORI = "synthefy/nori"  # general-purpose tabular in-context regressor
+KNOWN_NORI_MODELS = (NORI,)
+
+# Default model slug for remote (gateway) requests.
+GATEWAY_MODEL = NORI
 
 # Dedicated endpoint: a specific production deployment; body carries no "model".
 # To target it, pass base_url/endpoint to the constructor and set model=None.
-DEDICATED_BASE_URL = "https://model-3m5j7y9w.api.baseten.co"
+DEDICATED_BASE_URL = "https://model-qrj00rr3.api.baseten.co"
 DEDICATED_ENDPOINT = "/environments/production/predict"
 
 DEFAULT_TASK = "regression"
@@ -569,8 +581,11 @@ class SynthefyNoriClient:
     endpoint : str, default GATEWAY_ENDPOINT
         Path appended to ``base_url`` for predictions (remote mode).
     model : str or None, default GATEWAY_MODEL
-        Model identifier included in the request body (remote mode). Required by
-        the gateway; set to ``None`` for dedicated deployments.
+        Nori model slug included in the request body (remote mode); see
+        ``KNOWN_NORI_MODELS`` for the recognized slugs (currently just
+        ``"synthefy/nori"``). Any string is accepted, so a newly published model
+        works before this client is updated. Required by the gateway; set to
+        ``None`` for dedicated deployments.
     auth_scheme : {"Bearer", "Api-Key"}, default "Bearer"
         HTTP ``Authorization`` scheme prefixed to the API key (remote mode). The
         inference gateway requires ``"Bearer"``; dedicated deployments use

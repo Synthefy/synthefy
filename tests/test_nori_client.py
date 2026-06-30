@@ -19,6 +19,8 @@ from synthefy import (
     SynthefyNoriClient,
     NoriPredictRequest,
     NoriPredictResponse,
+    NORI,
+    KNOWN_NORI_MODELS,
 )
 from synthefy.api_client import (
     AuthenticationError,
@@ -85,6 +87,16 @@ def test_predict_returns_predictions_and_sends_expected_request():
     assert body["X_test"] == [[2.0, 2.0], [3.0, 3.0]]
     assert body["task"] == "regression"
     assert body["model"] == GATEWAY_MODEL
+
+
+def test_nori_model_family_constants():
+    """The documented Nori family is exported and consistent with the default."""
+    assert NORI == "synthefy/nori"
+    assert KNOWN_NORI_MODELS == ("synthefy/nori",)
+    assert GATEWAY_MODEL == NORI  # default model is the one public slug
+    # Dedicated path uses the current Baseten model id, not the stale one.
+    assert "qrj00rr3" in DEDICATED_BASE_URL
+    assert "3m5j7y9w" not in DEDICATED_BASE_URL
 
 
 def test_predict_accepts_numpy_arrays():
