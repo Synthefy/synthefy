@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.0]
+
+### Changed
+
+- **Default categorical encoding is now ordinal** (was one-hot).
+  `SynthefyNoriClient.predict` maps each non-numeric DataFrame column to a
+  single column of integer codes in sorted-category order — the same
+  convention as the Nori model's server-side `OrdinalEncoder` path (unseen
+  test value → `-1`, missing → NaN, imputed server-side). A 35-dataset
+  benchmark across three model sizes found ordinal at least as accurate as
+  one-hot on average, with one-hot substantially worse on wide,
+  categorical-heavy tables (it never widens the feature matrix).
+  Pass `categorical_encoding="onehot"` to restore the previous behavior.
+
+### Added
+
+- `categorical_encoding` parameter on `predict` (`"ordinal"` (default) or
+  `"onehot"`).
+
 ## [4.2.2]
 
 ### Fixed

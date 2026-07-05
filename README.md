@@ -276,7 +276,7 @@ print(predictions)  # -> [<float>, <float>]  (one per X_test row)
 `X_train`, `y_train`, and `X_test` accept Python lists, numpy arrays, or pandas
 objects (a `DataFrame` for the feature matrices; a `Series` or single-column
 `DataFrame` for `y_train`). When both `X_train` and `X_test` are DataFrames,
-**non-numeric columns are one-hot encoded for you** — fit on `X_train` and applied
+**non-numeric columns are encoded for you** — fit on `X_train` and applied
 to `X_test` — so you can pass raw categorical columns directly:
 
 ```python
@@ -286,19 +286,23 @@ X_train = pd.DataFrame({"price": [9.99, 4.50, 7.25], "region": ["NW", "SE", "NW"
 y_train = pd.Series([120.0, 305.0, 180.0])
 X_test  = pd.DataFrame({"region": ["SE"], "price": [5.00]})  # order need not match
 
-predictions = client.predict(X_train, y_train, X_test)  # 'region' is one-hot encoded
+predictions = client.predict(X_train, y_train, X_test)  # 'region' is encoded
 ```
 
-Categories come from `X_train`: a value seen only in `X_test` becomes an all-zeros
-indicator group, and a missing value (NaN) in a categorical column becomes its own
-one-hot indicator. Datetime columns and categorical columns with more than
+By default each categorical column becomes a single column of **ordinal codes**
+(categories from `X_train` in sorted order — the model's own server-side
+convention): a value seen only in `X_test` maps to `-1`, and a missing value
+(NaN) stays NaN for server-side imputation. Pass
+`categorical_encoding="onehot"` for the previous one-hot behavior (indicator
+columns per category; missing values get their own indicator; unseen values map
+to an all-zeros group). Datetime columns and categorical columns with more than
 `max_categorical_cardinality` (default 100) distinct training values are dropped
 with a warning; `timedelta` columns are unsupported and raise (convert them to a
 number or string first). Numeric columns (including `bool`) pass through unchanged,
 with NaN imputed server-side. Any **object-dtype** column is treated as categorical
 (including numeric-looking strings such as IDs or zip codes, and object date
 values) — cast genuine numeric columns to a numeric dtype if you want them kept as
-magnitudes. (Plain lists/numpy arrays must already be numeric — one-hot needs
+magnitudes. (Plain lists/numpy arrays must already be numeric — encoding needs
 column names.)
 
 Shapes are validated client-side: `X_train` and `y_train` must have the same
@@ -411,11 +415,12 @@ print(client.mode)  # "local" if synthefy-nori is installed, else "remote"
     apply to remote mode only.
   - Inputs accept Python lists, numpy arrays, or pandas DataFrames/Series.
     Feature columns must be numeric; DataFrame `X_test` is aligned to `X_train`
-    by column name; non-numeric columns are one-hot encoded (fit on `X_train`);
+    by column name; non-numeric columns are encoded (fit on `X_train`;
+    `categorical_encoding="ordinal"` by default, `"onehot"` available);
     missing values (NaN) are imputed server-side.
   - `max_categorical_cardinality` (default 100): non-numeric columns with more
     distinct training values than this — and datetime columns — are dropped with
-    a warning instead of one-hot encoded.
+    a warning instead of encoded.
   - `as_pandas=True` returns a pandas `Series` (named after `y_train`, indexed by
     `X_test`) instead of the default `list[float]`.
 - `mode`: the resolved mode (`"auto"` becomes `"local"`/`"remote"` at

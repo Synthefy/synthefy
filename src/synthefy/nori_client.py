@@ -225,11 +225,19 @@ def _coerce_vector(arr: VectorLike, name: str) -> np.ndarray:
     return vector
 
 
-# Default cap on a categorical column's distinct values before one-hot encoding.
-# Columns above this are dropped (with a warning) rather than exploding the
-# feature matrix — matches the model repo's offline evaluator, which drops
-# string columns with >100 unique values.
+# Default cap on a categorical column's distinct values before encoding.
+# Columns above this are dropped (with a warning): they are almost always
+# identifiers, and under one-hot they also explode the feature matrix —
+# matches the model repo's offline evaluator, which drops string columns with
+# >100 unique values.
 _DEFAULT_MAX_CARDINALITY = 100
+
+# How non-numeric columns are converted for the model. "ordinal" mirrors the
+# model's own server-side OrdinalEncoder path and benchmarked at least as well
+# as one-hot on 35 categorical datasets while never widening the matrix;
+# "onehot" preserves the previous client behavior.
+_DEFAULT_CATEGORICAL_ENCODING = "ordinal"
+_CATEGORICAL_ENCODINGS = ("ordinal", "onehot")
 
 
 def _has_encodable_columns(frame: pd.DataFrame) -> bool:
@@ -262,26 +270,38 @@ def _numeric_categories_to_values(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _featurize_frames(
-    X_train: pd.DataFrame, X_test: pd.DataFrame, max_cardinality: int
+    X_train: pd.DataFrame, X_test: pd.DataFrame, max_cardinality: int,
+    encoding: str = _DEFAULT_CATEGORICAL_ENCODING,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """One-hot encode non-numeric columns of two aligned frames (fit on train).
+    """Encode non-numeric columns of two aligned frames (fit on train).
 
     Numeric columns (including ``bool``, and ``category`` columns whose
     categories are numeric) pass through unchanged. Datetime columns, columns
     with no non-missing values, and categorical columns with more than
     ``max_cardinality`` distinct *training* values are dropped with a
-    ``UserWarning``; ``timedelta`` columns are unsupported and raise. Categories
-    come from ``X_train``: a value seen only in ``X_test`` maps to an all-zeros
-    indicator group, a category absent from ``X_test`` is still emitted as a zero
-    column, and a missing value (in either frame) gets its own indicator column
-    (``dummy_na=True``, but the indicator is dropped when no row is missing) — so
-    both frames come out with identical numeric columns and the server receives a
-    fully model-ready matrix (no reliance on server-side category detection).
+    ``UserWarning``; ``timedelta`` columns are unsupported and raise.
 
-    A column that is numeric in one frame but not the other raises ``ValueError``
-    (rather than failing later with a confusing message). ``X_train`` and
-    ``X_test`` must already share the same columns (callers align them by name
-    first). Row order and count are preserved.
+    With ``encoding="ordinal"`` (default) each categorical column stays a
+    single column of integer codes assigned in sorted-category order — the same
+    convention as the model's own server-side ``OrdinalEncoder`` path.
+    Categories come from ``X_train`` (compared as strings): a value seen only
+    in ``X_test`` maps to ``-1`` and a missing value (in either frame) maps to
+    ``NaN``, mirroring the server's ``unknown_value``/``encoded_missing_value``
+    settings. Column names and order are preserved.
+
+    With ``encoding="onehot"`` categories come from ``X_train``: a value seen
+    only in ``X_test`` maps to an all-zeros indicator group, a category absent
+    from ``X_test`` is still emitted as a zero column, and a missing value (in
+    either frame) gets its own indicator column (``dummy_na=True``, but the
+    indicator is dropped when no row is missing) — so both frames come out with
+    identical numeric columns.
+
+    Either way the server receives a fully model-ready matrix (no reliance on
+    server-side category detection). A column that is numeric in one frame but
+    not the other raises ``ValueError`` (rather than failing later with a
+    confusing message). ``X_train`` and ``X_test`` must already share the same
+    columns (callers align them by name first). Row order and count are
+    preserved.
     """
     # category-of-numeric -> plain numeric, so it is kept as a magnitude (not
     # one-hot exploded). Applied to both frames before any dtype inspection.
@@ -333,13 +353,33 @@ def _featurize_frames(
 
     if dropped:
         warnings.warn(
-            "Nori one-hot featurization dropped non-encodable column(s): "
+            "Nori featurization dropped non-encodable column(s): "
             + ", ".join(dropped)
             + ". Encode them yourself (e.g. target/hash encoding) if you need them.",
             stacklevel=4,
         )
 
-    if cat_cols:
+    if cat_cols and encoding == "ordinal":
+        # Single numeric column per categorical, codes in sorted-category order
+        # (the server's own OrdinalEncoder convention): train categories only,
+        # unseen test value -> -1, missing -> NaN. Original column order kept.
+        keep = set(numeric_cols) | set(cat_cols)
+        kept_cols = [c for c in X_train.columns if c in keep]
+        X_train_feat = X_train[kept_cols].reset_index(drop=True).copy()
+        X_test_feat = X_test[kept_cols].reset_index(drop=True).copy()
+        for col in cat_cols:
+            cats = np.unique(X_train[col].dropna().astype(str).to_numpy())
+            mapping = {c: i for i, c in enumerate(cats)}
+            for feat, src in ((X_train_feat, X_train), (X_test_feat, X_test)):
+                s = src[col].reset_index(drop=True)
+                codes = np.full(len(s), np.nan, dtype=np.float64)
+                notna = s.notna()
+                present = s[notna].astype(str).map(mapping)
+                codes[notna.to_numpy()] = (
+                    present.fillna(-1).to_numpy(dtype=np.float64)
+                )
+                feat[col] = codes
+    elif cat_cols:
         # dummy_na=True gives missing values their own indicator column, so NaN is
         # a distinct category rather than silently all-zeros. get_dummies always
         # emits a NaN column per categorical; drop columns that are all-zero in
@@ -387,7 +427,7 @@ def _featurize_frames(
 
     if X_train_feat.shape[1] == 0:
         raise ValueError(
-            "No usable feature columns remain after one-hot featurization (every "
+            "No usable feature columns remain after featurization (every "
             "column was dropped — temporal, all-missing, or above the "
             f"max_categorical_cardinality={max_cardinality} cap)."
         )
@@ -400,6 +440,7 @@ def _build_nori_request(
     X_test: MatrixLike,
     task: str = DEFAULT_TASK,
     max_categorical_cardinality: int = _DEFAULT_MAX_CARDINALITY,
+    categorical_encoding: str = _DEFAULT_CATEGORICAL_ENCODING,
 ) -> NoriPredictRequest:
     """Validate shapes and build a :class:`NoriPredictRequest`.
 
@@ -407,16 +448,22 @@ def _build_nori_request(
     ``X_train`` and ``X_test`` are DataFrames, ``X_test`` is aligned to
     ``X_train``'s columns *by name* (so column order is irrelevant), and a
     mismatch in the column sets raises ``ValueError``; then any non-numeric
-    columns are one-hot encoded (fit on ``X_train``, applied to ``X_test``) so
-    the request carries a fully numeric matrix. Otherwise columns are matched
-    positionally, as before. Raises ``ValueError`` on any shape mismatch before a
-    request leaves the process. NaN/missing values are preserved and imputed
-    server-side.
+    columns are encoded (fit on ``X_train``, applied to ``X_test`` —
+    ``categorical_encoding`` picks ordinal codes or one-hot indicators, see
+    :func:`_featurize_frames`) so the request carries a fully numeric matrix.
+    Otherwise columns are matched positionally, as before. Raises ``ValueError``
+    on any shape mismatch before a request leaves the process. NaN/missing
+    values are preserved and imputed server-side.
     """
     if max_categorical_cardinality < 1:
         raise ValueError(
             "max_categorical_cardinality must be a positive integer; got "
             f"{max_categorical_cardinality}."
+        )
+    if categorical_encoding not in _CATEGORICAL_ENCODINGS:
+        raise ValueError(
+            f"categorical_encoding must be one of {_CATEGORICAL_ENCODINGS}; "
+            f"got {categorical_encoding!r}."
         )
     train_cols = _frame_columns(X_train)
     test_cols = _frame_columns(X_test)
@@ -430,7 +477,7 @@ def _build_nori_request(
         )
         if _has_encodable_columns(df):
             raise ValueError(
-                f"{df_name} has non-numeric column(s) to one-hot encode, but "
+                f"{df_name} has non-numeric column(s) to encode, but "
                 f"{other} is not a DataFrame; pass both X_train and X_test as "
                 "DataFrames with the same columns so they can be aligned and "
                 "encoded (or pre-encode to numeric)."
@@ -453,8 +500,8 @@ def _build_nori_request(
             # Same columns, different order: reorder X_test to match X_train so
             # the model sees features in a consistent position.
             X_test = X_test[train_cols]
-        # One-hot encode any non-numeric columns into a fully numeric matrix,
-        # fitting on X_train and applying the same layout to X_test. Only the
+        # Encode any non-numeric columns into a fully numeric matrix, fitting
+        # on X_train and applying the same layout to X_test. Only the
         # DataFrame/DataFrame case can do this (column names are required). Check
         # both frames so a column that is non-numeric in only one of them is
         # caught with a clear error rather than a later cryptic float-cast.
@@ -464,7 +511,8 @@ def _build_nori_request(
             and (_has_encodable_columns(X_train) or _has_encodable_columns(X_test))
         ):
             X_train, X_test = _featurize_frames(
-                X_train, X_test, max_categorical_cardinality
+                X_train, X_test, max_categorical_cardinality,
+                encoding=categorical_encoding,
             )
 
     X_train_arr = _coerce_matrix(X_train, "X_train")
@@ -677,6 +725,7 @@ class SynthefyNoriClient:
         *,
         as_pandas: bool = False,
         max_categorical_cardinality: int = _DEFAULT_MAX_CARDINALITY,
+        categorical_encoding: str = _DEFAULT_CATEGORICAL_ENCODING,
         timeout: Optional[float] = None,
         extra_headers: Optional[Dict[str, str]] = None,
     ) -> Union[List[float], pd.Series]:
@@ -687,11 +736,12 @@ class SynthefyNoriClient:
         X_train : array-like of shape (n_context, n_features)
             Labeled context rows. Python lists, numpy arrays, or a pandas
             DataFrame are accepted. In the DataFrame/DataFrame case, non-numeric
-            columns are one-hot encoded for you (see ``X_test`` and
-            ``max_categorical_cardinality``); otherwise all columns must be
-            numeric. Missing values are allowed: NaN in a numeric column is
-            imputed server-side; NaN in a categorical column becomes its own
-            one-hot indicator.
+            columns are encoded for you (see ``X_test``,
+            ``categorical_encoding``, and ``max_categorical_cardinality``);
+            otherwise all columns must be numeric. Missing values are allowed:
+            NaN in a numeric column is imputed server-side; NaN in a categorical
+            column stays NaN under ordinal encoding (imputed server-side) or
+            becomes its own indicator under one-hot.
         y_train : array-like of shape (n_context,)
             Target value for each context row. A Python list, numpy array, or a
             pandas Series / single-column DataFrame is accepted.
@@ -700,11 +750,12 @@ class SynthefyNoriClient:
             ``X_train``. When both ``X_train`` and ``X_test`` are DataFrames,
             ``X_test`` is aligned to ``X_train``'s columns *by name* (column
             order is irrelevant; a mismatch in the column sets raises), and any
-            non-numeric columns are **one-hot encoded** — fit on ``X_train`` and
-            applied to ``X_test`` — into a fully numeric matrix. Categories come
-            from ``X_train``: a value seen only in ``X_test`` becomes an
-            all-zeros indicator group, and a missing value gets its own
-            indicator column. Datetime columns and categorical columns with more
+            non-numeric columns are **encoded** — fit on ``X_train`` and
+            applied to ``X_test`` — into a fully numeric matrix. By default
+            each categorical column becomes a single column of ordinal codes
+            (categories from ``X_train`` in sorted order; a value seen only in
+            ``X_test`` maps to -1, missing to NaN — the model's own server-side
+            convention). Datetime columns and categorical columns with more
             than ``max_categorical_cardinality`` distinct training values are
             dropped with a warning; ``timedelta`` columns are unsupported and
             raise (convert them to a number or string first).
@@ -718,9 +769,17 @@ class SynthefyNoriClient:
             predictions join straight back). Default is the plain ``list``.
         max_categorical_cardinality : int, default 100
             Maximum number of distinct training values a non-numeric column may
-            have to be one-hot encoded (DataFrame inputs only). Columns above
-            this cap are dropped with a warning instead of exploding the feature
-            matrix. Ignored when inputs are already numeric.
+            have to be encoded (DataFrame inputs only). Columns above this cap —
+            almost always identifiers — are dropped with a warning. Ignored
+            when inputs are already numeric.
+        categorical_encoding : {"ordinal", "onehot"}, default "ordinal"
+            How non-numeric columns are encoded (DataFrame inputs only).
+            ``"ordinal"`` maps each categorical column to one column of integer
+            codes, matching the model's server-side handling of categoricals;
+            it benchmarked at least as well as one-hot across 35 categorical
+            datasets and never widens the feature matrix. ``"onehot"``
+            reproduces the previous client behavior (indicator columns per
+            category, missing values get their own indicator).
         timeout : float or None, optional
             Override the client timeout for this request (remote mode only;
             ignored in local mode).
@@ -742,8 +801,9 @@ class SynthefyNoriClient:
             have mismatched column sets or duplicate column names; if a column is
             numeric in one of ``X_train``/``X_test`` but not the other; if a
             column has unsupported ``timedelta`` dtype; if a non-DataFrame input
-            contains non-numeric values; or if one-hot featurization leaves no
-            usable columns.
+            contains non-numeric values; if ``categorical_encoding`` is not one
+            of ``"ordinal"``/``"onehot"``; or if featurization leaves no usable
+            columns.
         ImportError
             In local mode, if the optional ``synthefy-nori`` package is not
             installed (with guidance to ``pip install "synthefy[local]"``).
@@ -760,6 +820,7 @@ class SynthefyNoriClient:
         request = _build_nori_request(
             X_train, y_train, X_test, task,
             max_categorical_cardinality=max_categorical_cardinality,
+            categorical_encoding=categorical_encoding,
         )
         if self.mode == "local":
             predictions = self._predict_local(request)

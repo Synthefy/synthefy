@@ -170,6 +170,82 @@ def test_dataframe_column_set_mismatch_raises():
 # --------------------------------------------------------------------------- #
 
 
+def test_non_numeric_columns_are_ordinal_encoded_by_default():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([5.0], capture))
+
+    out = client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0, 2.0], "cat": ["y", "x", "y"]}),
+        y_train=[1.0, 2.0, 3.0],
+        # 'z' is unseen in training -> code -1 (the server's unknown_value).
+        X_test=pd.DataFrame({"a": [3.0, 4.0], "cat": ["x", "z"]}),
+    )
+
+    assert out == [5.0]
+    # one column per categorical, codes in sorted-category order: x=0, y=1
+    assert capture["body"]["X_train"] == [[0.0, 1.0], [1.0, 0.0], [2.0, 1.0]]
+    assert capture["body"]["X_test"] == [[3.0, 0.0], [4.0, -1.0]]
+
+
+def test_ordinal_missing_categorical_is_forwarded_as_nan():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0, 2.0], "cat": ["x", None, "y"]}),
+        y_train=[1.0, 2.0, 3.0],
+        X_test=pd.DataFrame({"a": [5.0], "cat": ["x"]}),
+    )
+    sent = capture["body"]["X_train"]
+    # x=0, y=1; the missing row stays NaN for server-side imputation.
+    assert sent[0] == [0.0, 0.0] and sent[2] == [2.0, 1.0]
+    assert math.isnan(sent[1][1])
+    assert capture["body"]["X_test"] == [[5.0, 0.0]]
+
+
+def test_ordinal_literal_nan_string_is_a_real_category():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": ["nan", "x"]}),
+        y_train=[1.0, 2.0],
+        X_test=pd.DataFrame({"a": [2.0], "cat": ["nan"]}),
+    )
+    # "nan" (the string) sorts before "x": nan=0, x=1 — not treated as missing.
+    assert capture["body"]["X_train"] == [[0.0, 0.0], [1.0, 1.0]]
+    assert capture["body"]["X_test"] == [[2.0, 0.0]]
+
+
+def test_ordinal_name_value_collision_is_a_non_issue():
+    # Under one-hot, column 'a' value 'b_x' and column 'a_b' value 'x' collide
+    # in the '<column>_<value>' namespace; ordinal never generates columns.
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], capture))
+
+    client.predict(
+        X_train=pd.DataFrame({"a": ["b_x", "c"], "a_b": ["x", "y"]}),
+        y_train=[1.0, 2.0],
+        X_test=pd.DataFrame({"a": ["b_x"], "a_b": ["x"]}),
+    )
+    assert capture["body"]["X_train"] == [[0.0, 0.0], [1.0, 1.0]]
+    assert capture["body"]["X_test"] == [[0.0, 0.0]]
+
+
+def test_invalid_categorical_encoding_raises():
+    client = SynthefyNoriClient(api_key="test-key")
+    df = pd.DataFrame({"cat": ["x", "y"]})
+    with pytest.raises(ValueError, match="categorical_encoding"):
+        client.predict(
+            X_train=df, y_train=[1.0, 2.0], X_test=df,
+            categorical_encoding="hashing",
+        )
+
+
 def test_non_numeric_columns_are_one_hot_encoded():
     capture: Dict = {}
     client = SynthefyNoriClient(api_key="test-key")
@@ -180,6 +256,7 @@ def test_non_numeric_columns_are_one_hot_encoded():
         y_train=[1.0, 2.0],
         # 'z' is unseen in training -> its indicator group is all zeros.
         X_test=pd.DataFrame({"a": [2.0], "cat": ["z"]}),
+        categorical_encoding="onehot",
     )
 
     assert out == [5.0]
@@ -197,6 +274,7 @@ def test_one_hot_train_category_absent_in_test_is_kept_as_zero_column():
         X_train=pd.DataFrame({"a": [0.0, 1.0, 2.0], "cat": ["x", "y", "z"]}),
         y_train=[1.0, 2.0, 3.0],
         X_test=pd.DataFrame({"a": [5.0], "cat": ["x"]}),
+        categorical_encoding="onehot",
     )
 
     # train has 3 categories -> cat_x, cat_y, cat_z; test row 'x' -> [1,0,0]
@@ -349,6 +427,7 @@ def test_nan_in_categorical_gets_its_own_indicator_column():
         X_train=pd.DataFrame({"a": [0.0, 1.0, 2.0], "cat": ["x", None, "y"]}),
         y_train=[1.0, 2.0, 3.0],
         X_test=pd.DataFrame({"a": [5.0], "cat": ["x"]}),
+        categorical_encoding="onehot",
     )
     # columns: a, cat_x, cat_y, cat_nan (the missing row -> its own indicator)
     assert capture["body"]["X_train"] == [
@@ -391,7 +470,8 @@ def test_one_hot_name_value_collision_raises_clearly():
     Xtr = pd.DataFrame({"a": ["b_x", "b_x"], "a_b": ["x", "y"]})
     Xte = pd.DataFrame({"a": ["b_x"], "a_b": ["x"]})
     with pytest.raises(ValueError, match="duplicate column names"):
-        client.predict(X_train=Xtr, y_train=[1.0, 2.0], X_test=Xte)
+        client.predict(X_train=Xtr, y_train=[1.0, 2.0], X_test=Xte,
+                       categorical_encoding="onehot")
 
 
 def test_period_column_raises_unsupported():
@@ -441,6 +521,7 @@ def test_literal_nan_string_category_is_not_treated_as_missing():
         X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": ["nan", "x"]}),
         y_train=[1.0, 2.0],
         X_test=pd.DataFrame({"a": [2.0], "cat": ["nan"]}),
+        categorical_encoding="onehot",
     )
     # columns: a, cat_nan, cat_x  — no NaN-indicator column, no error
     assert capture["body"]["X_train"] == [[0.0, 1.0, 0.0], [1.0, 0.0, 1.0]]
