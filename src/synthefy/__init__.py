@@ -5,7 +5,7 @@ from synthefy.nori_client import (
     NoriPredictResponse,
 )
 
-__version__ = "4.2.2"
+__version__ = "4.3.0"
 
 __all__ = [
     "SynthefyAPIClient",
