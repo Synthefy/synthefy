@@ -373,8 +373,8 @@ package. Install the extra:
 pip install "synthefy[local]"
 ```
 
-The `local` extra (via `synthefy-nori>=0.9.0`) supports Python >= 3.9, the
-same floor as the base package.
+The `local` extra (via `synthefy-nori>=0.10.0`, which provides the `model=` size selector)
+supports Python >= 3.9, the same floor as the base package.
 
 ```python
 from synthefy import SynthefyNoriClient
