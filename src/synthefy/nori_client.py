@@ -43,6 +43,29 @@ GATEWAY_BASE_URL = "https://inference.baseten.co"
 GATEWAY_ENDPOINT = "/predict"
 GATEWAY_MODEL = "synthefy/nori"
 
+# Friendly Nori size selector -> (remote gateway model slug, local variant name passed to the
+# synthefy-nori ``model=`` selector). "nori"/"nori-6m" are the ~6M base (the default); "nori-30m"
+# is the ~29.2M variant. A raw slug or ``None`` (dedicated endpoint) passes through unchanged;
+# local inference then uses the base checkpoint. Add one line per new variant.
+NORI_VARIANTS = {
+    "nori": ("synthefy/nori", None),
+    "nori-6m": ("synthefy/nori", None),
+    "nori-30m": ("synthefy/nori-30m", "nori-30m"),
+}
+
+
+def _resolve_variant(model: Optional[str]) -> tuple:
+    """Map a friendly variant name to ``(gateway_model, local_variant)``.
+
+    A known name resolves via :data:`NORI_VARIANTS`; anything else (a raw gateway slug, or
+    ``None`` for a dedicated endpoint) passes through as the gateway model with the base
+    checkpoint locally.
+    """
+    if model is not None and model in NORI_VARIANTS:
+        return NORI_VARIANTS[model]
+    return model, None
+
+
 # Dedicated endpoint: a specific production deployment; body carries no "model".
 # To target it, pass base_url/endpoint to the constructor and set model=None.
 DEDICATED_BASE_URL = "https://model-3m5j7y9w.api.baseten.co"
@@ -617,8 +640,12 @@ class SynthefyNoriClient:
     endpoint : str, default GATEWAY_ENDPOINT
         Path appended to ``base_url`` for predictions (remote mode).
     model : str or None, default GATEWAY_MODEL
-        Model identifier included in the request body (remote mode). Required by
-        the gateway; set to ``None`` for dedicated deployments.
+        Which Nori to run. Accepts a friendly size selector — ``"nori"`` / ``"nori-6m"``
+        (the ~6M base, the default) or ``"nori-30m"`` (the ~29.2M variant) — which selects
+        both the remote gateway deployment and, in local mode, the checkpoint. A raw gateway
+        slug (e.g. ``"synthefy/nori"``) is also accepted verbatim, and ``None`` targets a
+        dedicated deployment (no ``model`` field in the body). Selecting a non-base variant in
+        local mode requires a synthefy-nori build with the ``model=`` selector.
     auth_scheme : {"Bearer", "Api-Key"}, default "Bearer"
         HTTP ``Authorization`` scheme prefixed to the API key (remote mode). The
         inference gateway requires ``"Bearer"``; dedicated deployments use
@@ -679,7 +706,10 @@ class SynthefyNoriClient:
         self.max_retries = max_retries
         self.base_url = base_url
         self.endpoint = endpoint
-        self.model = model
+        # Resolve the variant selector: a friendly name ("nori"/"nori-6m"/"nori-30m") maps to a
+        # remote gateway slug + a local variant; a raw slug or None passes through. self.model is
+        # the gateway model id sent in the remote body (unchanged semantics for raw slugs/None).
+        self.model, self._local_variant = _resolve_variant(model)
         self.auth_scheme = auth_scheme
         self.user_agent = (
             user_agent or f"synthefy-python httpx/{httpx.__version__}"
@@ -843,11 +873,24 @@ class SynthefyNoriClient:
 
     def _predict_local(self, request: NoriPredictRequest) -> List[float]:
         local_predict = _load_local_predict()
+        extra: Dict[str, Any] = {}
+        if self._local_variant is not None:
+            # Selecting a non-base local variant needs a synthefy-nori that exposes the model=
+            # selector; fail with a clear upgrade hint instead of an opaque TypeError on old builds.
+            import inspect
+
+            if "model" not in inspect.signature(local_predict).parameters:
+                raise ImportError(
+                    f"Local Nori variant {self._local_variant!r} requires a newer synthefy-nori "
+                    '(with the model= selector). Upgrade with: pip install -U "synthefy[local]".'
+                )
+            extra["model"] = self._local_variant
         result = local_predict(
             request.X_train,
             request.y_train,
             request.X_test,
             task=request.task,
+            **extra,
         )
         return _as_float_list(result)
 

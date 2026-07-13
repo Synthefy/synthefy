@@ -934,3 +934,79 @@ def test_local_predict_real_inference():
     assert isinstance(preds, list)
     assert len(preds) == 5
     assert all(isinstance(p, float) for p in preds)
+
+
+# --------------------------------------------------------------------------- #
+# Model-variant selector
+# --------------------------------------------------------------------------- #
+
+_XTR = [[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]
+_YTR = [1.0, 1.0, 2.0]
+_XTE = [[2.0, 2.0]]
+
+
+def test_model_variant_resolves_gateway_and_local():
+    c30 = SynthefyNoriClient(api_key="k", model="nori-30m")
+    assert c30.model == "synthefy/nori-30m"
+    assert c30._local_variant == "nori-30m"
+
+    # "nori" / "nori-6m" are the ~6M base: base gateway, no local variant override
+    for name in ("nori", "nori-6m"):
+        c = SynthefyNoriClient(api_key="k", model=name)
+        assert c.model == "synthefy/nori" and c._local_variant is None
+
+    # a raw gateway slug passes through unchanged
+    craw = SynthefyNoriClient(api_key="k", model="synthefy/custom")
+    assert craw.model == "synthefy/custom" and craw._local_variant is None
+
+    # None (dedicated endpoint) stays None
+    cnone = SynthefyNoriClient(api_key="k", model=None)
+    assert cnone.model is None and cnone._local_variant is None
+
+
+def test_default_model_is_the_base_gateway():
+    assert SynthefyNoriClient(api_key="k").model == GATEWAY_MODEL
+
+
+def test_remote_body_uses_variant_gateway_slug():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="k", model="nori-30m")
+    _attach_mock(client, _ok_handler([1.0], capture))
+    client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
+    assert capture["body"]["model"] == "synthefy/nori-30m"
+
+
+def test_local_mode_passes_variant_to_predict(monkeypatch):
+    seen: Dict = {}
+
+    def fake_predict(X_train, y_train, X_test, *, task=None, model="__unset__"):
+        seen["model"] = model
+        return [0.0]
+
+    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
+    client = SynthefyNoriClient(mode="local", model="nori-30m")
+    client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
+    assert seen["model"] == "nori-30m"
+
+
+def test_local_mode_base_does_not_force_a_variant(monkeypatch):
+    seen: Dict = {}
+
+    def fake_predict(X_train, y_train, X_test, *, task=None, model="__unset__"):
+        seen["model"] = model
+        return [0.0]
+
+    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
+    client = SynthefyNoriClient(mode="local", model="nori")  # base 6M
+    client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
+    assert seen["model"] == "__unset__"  # model= not passed → predict() uses its own default
+
+
+def test_local_variant_needs_model_selector_on_old_synthefy_nori(monkeypatch):
+    def old_predict(X_train, y_train, X_test, *, task=None):  # no model= param
+        return [0.0]
+
+    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: old_predict)
+    client = SynthefyNoriClient(mode="local", model="nori-30m")
+    with pytest.raises(ImportError, match="model= selector"):
+        client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
