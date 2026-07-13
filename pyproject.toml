@@ -41,9 +41,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # Optional local inference for SynthefyNoriClient(mode="local"/"auto").
-# synthefy-nori >=0.9.0 supports Python >=3.9, matching this package's floor,
-# so no environment marker is needed.
-local = ["synthefy-nori>=0.9.0"]
+# synthefy-nori >=0.10.0 provides the model= variant selector (needed for local Nori-30M) and
+# supports Python >=3.9, matching this package's floor, so no environment marker is needed.
+local = ["synthefy-nori>=0.10.0"]
 
 [project.urls]
 Homepage = "https://synthefy.com"
