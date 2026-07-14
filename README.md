@@ -400,6 +400,43 @@ client = SynthefyNoriClient(api_key="your_baseten_api_key", mode="auto")
 print(client.mode)  # "local" if synthefy-nori is installed, else "remote"
 ```
 
+### Categorical / Ordinal Targets (`discretize=` / `categorical_levels=`)
+
+When the target only takes a small set of discrete values (a 1–5 rating, a
+count, a quality score), pass `discretize=` and every returned prediction is
+one of the target's own levels instead of a continuous estimate:
+
+```python
+labels = client.predict(X_train, y_train, X_test, discretize="snap-mean")
+labels = client.predict(
+    X_train, y_train, X_test,
+    discretize="snap-mean",
+    categorical_levels=[1, 2, 3, 4, 5],   # the full scale, if the context may under-cover it
+)
+```
+
+Discretization is **strictly opt-in** — nothing is snapped unless you ask.
+`categorical_levels` is the set of values the target can take (numeric,
+order-significant); it defaults to the distinct values of `y_train`, which is
+leak-safe. A `NaN` prediction stays `NaN` rather than becoming a confident
+label.
+
+Capability differs by mode:
+
+- **Remote**: the hosted endpoint returns point predictions (the distribution
+  mean), so the supported strategy is `discretize="snap-mean"` — the nearest
+  level to the point prediction, computed client-side and identical to local
+  `"snap-mean"`. Other strategies raise a `ValueError` pointing here.
+- **Local** (`pip install "synthefy[local]"`, with a `synthefy-nori` recent
+  enough to ship `synthefy_nori.discretize`): the full strategy set is
+  forwarded — `"map-cell"` (accuracy-optimal), `"median-cell"` (MAE-optimal),
+  `"snap-mean"` (QWK), `"snap-median"`, `"expected-level"`, `"prior-match"`.
+  Choose by the metric you are scored on; see the `synthefy-nori` docs. An
+  older `synthefy-nori` raises an `ImportError` with an upgrade hint.
+
+If your task is scored by squared error / R², don't discretize — the
+continuous mean is already optimal for those metrics.
+
 ## API Reference
 
 ### SynthefyNoriClient (Tabular Regression)
@@ -423,6 +460,11 @@ print(client.mode)  # "local" if synthefy-nori is installed, else "remote"
     a warning instead of encoded.
   - `as_pandas=True` returns a pandas `Series` (named after `y_train`, indexed by
     `X_test`) instead of the default `list[float]`.
+  - `discretize=` / `categorical_levels=` map predictions onto a discrete
+    target's levels (see
+    [Categorical / Ordinal Targets](#categorical--ordinal-targets-discretize--categorical_levels));
+    remote mode supports `discretize="snap-mean"`, local mode the full
+    strategy set of the installed `synthefy-nori`.
 - `mode`: the resolved mode (`"auto"` becomes `"local"`/`"remote"` at
   construction).
 - `close()` / context manager support (`with SynthefyNoriClient(...) as client:`).

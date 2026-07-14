@@ -30,6 +30,7 @@ from synthefy.nori_client import (
     DEDICATED_ENDPOINT,
     GATEWAY_ENDPOINT,
     GATEWAY_MODEL,
+    _discretize_remote,
 )
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -1010,3 +1011,156 @@ def test_local_variant_needs_model_selector_on_old_synthefy_nori(monkeypatch):
     client = SynthefyNoriClient(mode="local", model="nori-30m")
     with pytest.raises(ImportError, match="model= selector"):
         client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
+
+
+# --------------------------------------------------------------------------- #
+# Categorical-target discretization (discretize= / categorical_levels=)
+# --------------------------------------------------------------------------- #
+
+
+def test_remote_snap_mean_snaps_to_y_train_levels():
+    # y_train levels {1, 2}; returned means snap to the nearest level.
+    client = SynthefyNoriClient(api_key="k")
+    _attach_mock(client, _ok_handler([0.9, 1.6, 2.4], {}))
+    preds = client.predict(
+        X_train=[[0.0], [1.0], [2.0]],
+        y_train=[1.0, 1.0, 2.0],
+        X_test=[[0.5], [1.5], [2.5]],
+        discretize="snap-mean",
+    )
+    assert preds == [1.0, 2.0, 2.0]
+
+
+def test_remote_snap_mean_uses_explicit_categorical_levels():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="k")
+    _attach_mock(client, _ok_handler([0.9, 4.2], capture))
+    preds = client.predict(
+        X_train=[[0.0], [1.0], [2.0]],
+        y_train=[2.0, 2.0, 3.0],
+        X_test=[[0.5], [1.5]],
+        discretize="snap-mean",
+        categorical_levels=[1, 2, 3, 4, 5],
+    )
+    assert preds == [1.0, 4.0]
+    # Discretization is client-side: the wire payload is unchanged.
+    assert set(capture["body"]) == {"X_train", "y_train", "X_test", "task", "model"}
+
+
+def test_remote_snap_mean_as_pandas_stays_on_lattice():
+    client = SynthefyNoriClient(api_key="k")
+    _attach_mock(client, _ok_handler([0.9, 1.6], {}))
+    X_test = pd.DataFrame({"a": [0.5, 1.5]}, index=[10, 20])
+    preds = client.predict(
+        X_train=pd.DataFrame({"a": [0.0, 1.0, 2.0]}),
+        y_train=pd.Series([1.0, 1.0, 2.0], name="rating"),
+        X_test=X_test,
+        as_pandas=True,
+        discretize="snap-mean",
+    )
+    assert isinstance(preds, pd.Series)
+    assert preds.name == "rating"
+    assert list(preds.index) == [10, 20]
+    assert preds.tolist() == [1.0, 2.0]
+
+
+def test_remote_bank_strategy_raises_with_guidance():
+    client = SynthefyNoriClient(api_key="k")
+    _attach_mock(client, _ok_handler([1.0], {}))
+    with pytest.raises(ValueError, match="snap-mean"):
+        client.predict(
+            X_train=_XTR, y_train=_YTR, X_test=_XTE, discretize="map-cell"
+        )
+
+
+def test_remote_levels_without_strategy_raises_with_guidance():
+    client = SynthefyNoriClient(api_key="k")
+    _attach_mock(client, _ok_handler([1.0], {}))
+    with pytest.raises(ValueError, match='discretize="snap-mean"'):
+        client.predict(
+            X_train=_XTR, y_train=_YTR, X_test=_XTE, categorical_levels=[1, 2]
+        )
+
+
+def test_remote_empty_or_nonfinite_levels_raise():
+    for bad in ([], [1.0, float("nan")]):
+        with pytest.raises(ValueError, match="finite"):
+            _discretize_remote([1.0], [1.0, 2.0], "snap-mean", bad)
+
+
+def test_discretize_remote_preserves_nan_predictions():
+    snapped = _discretize_remote(
+        [0.9, float("nan"), 2.6], [1.0, 2.0, 3.0], "snap-mean", None
+    )
+    assert snapped[0] == 1.0 and snapped[2] == 3.0
+    assert math.isnan(snapped[1])
+
+
+def test_local_mode_passes_discretize_and_levels(monkeypatch):
+    seen: Dict = {}
+
+    def fake_predict(X_train, y_train, X_test, *, task=None, **kwargs):
+        seen.update(kwargs)
+        return [1.0]
+
+    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
+    monkeypatch.setattr("synthefy.nori_client._local_discretize_available", lambda: True)
+    client = SynthefyNoriClient(mode="local")
+    client.predict(
+        X_train=_XTR,
+        y_train=_YTR,
+        X_test=_XTE,
+        discretize="median-cell",
+        categorical_levels=[1, 2],
+    )
+    assert seen["discretize"] == "median-cell"
+    assert seen["categorical_levels"] == [1, 2]
+
+
+def test_local_mode_levels_alone_activate_package_default(monkeypatch):
+    seen: Dict = {}
+
+    def fake_predict(X_train, y_train, X_test, *, task=None, **kwargs):
+        seen.update(kwargs)
+        return [1.0]
+
+    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
+    monkeypatch.setattr("synthefy.nori_client._local_discretize_available", lambda: True)
+    client = SynthefyNoriClient(mode="local")
+    client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE, categorical_levels=[1, 2])
+    assert "discretize" not in seen  # package picks its own default (map-cell)
+    assert seen["categorical_levels"] == [1, 2]
+
+
+def test_local_mode_without_discretize_sends_no_extra_kwargs(monkeypatch):
+    def strict_predict(X_train, y_train, X_test, *, task=None):  # no **kwargs
+        return [1.0]
+
+    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: strict_predict)
+    client = SynthefyNoriClient(mode="local")
+    assert client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE) == [1.0]
+
+
+def test_local_discretize_needs_newer_synthefy_nori(monkeypatch):
+    monkeypatch.setattr(
+        "synthefy.nori_client._load_local_predict", lambda: (lambda *a, **k: [1.0])
+    )
+    monkeypatch.setattr("synthefy.nori_client._local_discretize_available", lambda: False)
+    client = SynthefyNoriClient(mode="local")
+    with pytest.raises(ImportError, match=r"synthefy\[local\]"):
+        client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE, discretize="map-cell")
+
+
+@pytest.mark.slow
+def test_local_discretize_real_inference():
+    pytest.importorskip("synthefy_nori.discretize")
+
+    client = SynthefyNoriClient(mode="local")
+    rng = np.random.default_rng(0)
+    X_train = rng.normal(size=(30, 3))
+    y_train = np.clip(np.round(X_train[:, 0] * 2.0 + 3.0), 1, 5)
+    X_test = rng.normal(size=(5, 3))
+
+    preds = client.predict(X_train, y_train, X_test, discretize="map-cell")
+    levels = set(np.unique(y_train).tolist())
+    assert all(p in levels for p in preds)
