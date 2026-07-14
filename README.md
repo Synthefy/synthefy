@@ -416,8 +416,8 @@ labels = client.predict(
 ```
 
 Discretization is **strictly opt-in** — nothing is snapped unless you ask.
-`categorical_levels` is the set of values the target can take (numeric,
-order-significant); it defaults to the distinct values of `y_train`, which is
+`categorical_levels` is the set of values the target can take (numeric; order
+and duplicates don't matter); it defaults to the distinct values of `y_train`, which is
 leak-safe. A `NaN` prediction stays `NaN` rather than becoming a confident
 label.
 

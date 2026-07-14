@@ -613,13 +613,16 @@ def _local_discretize_available() -> bool:
 _REMOTE_DISCRETIZE_METHOD = "snap-mean"
 
 
-def _discretize_remote(
-    predictions: List[float],
+def _resolve_remote_levels(
     y_train: List[float],
     discretize: Optional[str],
     categorical_levels: Optional[VectorLike],
-) -> List[float]:
-    """Snap remote point predictions onto the target's level lattice."""
+) -> "np.ndarray":
+    """Validate remote discretization arguments and resolve the level lattice.
+
+    Called before the network request so an unsupported strategy or bad level
+    set fails fast instead of after a paid inference round-trip.
+    """
     if discretize is None:
         raise ValueError(
             "categorical_levels without discretize= implies the package "
@@ -640,6 +643,11 @@ def _discretize_remote(
     if categorical_levels is None:
         levels = np.unique(np.asarray(y_train, dtype=float))
         levels = levels[np.isfinite(levels)]
+        if levels.size == 0:
+            raise ValueError(
+                "y_train has no finite values to derive categorical levels "
+                "from; pass categorical_levels explicitly."
+            )
     else:
         levels = np.unique(np.asarray(categorical_levels, dtype=float).reshape(-1))
         if levels.size == 0 or not np.all(np.isfinite(levels)):
@@ -647,6 +655,11 @@ def _discretize_remote(
                 "categorical_levels must be a non-empty sequence of finite "
                 f"numbers; got {categorical_levels!r}"
             )
+    return levels
+
+
+def _snap_to_levels(predictions: List[float], levels: "np.ndarray") -> List[float]:
+    """Snap point predictions onto the level lattice."""
     preds = np.asarray(predictions, dtype=float)
     snapped = preds.copy()
     finite = np.isfinite(preds)
@@ -890,8 +903,9 @@ class SynthefyNoriClient:
             with guidance. A ``NaN`` prediction stays ``NaN`` after snapping.
         categorical_levels : array-like of float or None, optional
             The complete set of values the target can take — its label set,
-            in classification terms. Values must be numeric; their order
-            matters (levels, not labels). Defaults to the distinct values of
+            in classification terms. Values must be numeric; order and
+            duplicates are irrelevant (the set is normalized to sorted
+            distinct values). Defaults to the distinct values of
             ``y_train``, which is leak-safe; pass it explicitly when the
             context may under-cover the true scale (e.g. a 1–5 rating whose
             context has no 1s). Passing it alone activates discretization
@@ -950,13 +964,16 @@ class SynthefyNoriClient:
                 categorical_levels=categorical_levels,
             )
         else:
+            remote_levels = None
+            if discretize is not None or categorical_levels is not None:
+                remote_levels = _resolve_remote_levels(
+                    request.y_train, discretize, categorical_levels
+                )
             predictions = self._predict_remote(
                 request, timeout=timeout, extra_headers=extra_headers
             )
-            if discretize is not None or categorical_levels is not None:
-                predictions = _discretize_remote(
-                    predictions, request.y_train, discretize, categorical_levels
-                )
+            if remote_levels is not None:
+                predictions = _snap_to_levels(predictions, remote_levels)
         if as_pandas:
             return pd.Series(
                 predictions,

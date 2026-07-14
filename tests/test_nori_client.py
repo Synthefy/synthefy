@@ -30,7 +30,8 @@ from synthefy.nori_client import (
     DEDICATED_ENDPOINT,
     GATEWAY_ENDPOINT,
     GATEWAY_MODEL,
-    _discretize_remote,
+    _resolve_remote_levels,
+    _snap_to_levels,
 )
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -1065,33 +1066,47 @@ def test_remote_snap_mean_as_pandas_stays_on_lattice():
 
 
 def test_remote_bank_strategy_raises_with_guidance():
+    # Validation runs before the request: no paid round-trip on a bad strategy.
+    capture: Dict = {}
     client = SynthefyNoriClient(api_key="k")
-    _attach_mock(client, _ok_handler([1.0], {}))
+    _attach_mock(client, _ok_handler([1.0], capture))
     with pytest.raises(ValueError, match="snap-mean"):
         client.predict(
             X_train=_XTR, y_train=_YTR, X_test=_XTE, discretize="map-cell"
         )
+    assert "body" not in capture
 
 
 def test_remote_levels_without_strategy_raises_with_guidance():
+    capture: Dict = {}
     client = SynthefyNoriClient(api_key="k")
-    _attach_mock(client, _ok_handler([1.0], {}))
+    _attach_mock(client, _ok_handler([1.0], capture))
     with pytest.raises(ValueError, match='discretize="snap-mean"'):
         client.predict(
             X_train=_XTR, y_train=_YTR, X_test=_XTE, categorical_levels=[1, 2]
         )
+    assert "body" not in capture
 
 
 def test_remote_empty_or_nonfinite_levels_raise():
     for bad in ([], [1.0, float("nan")]):
         with pytest.raises(ValueError, match="finite"):
-            _discretize_remote([1.0], [1.0, 2.0], "snap-mean", bad)
+            _resolve_remote_levels([1.0, 2.0], "snap-mean", bad)
 
 
-def test_discretize_remote_preserves_nan_predictions():
-    snapped = _discretize_remote(
-        [0.9, float("nan"), 2.6], [1.0, 2.0, 3.0], "snap-mean", None
-    )
+def test_remote_all_nan_y_train_raises_instead_of_opaque_error():
+    with pytest.raises(ValueError, match="categorical_levels explicitly"):
+        _resolve_remote_levels([float("nan"), float("nan")], "snap-mean", None)
+
+
+def test_remote_levels_order_and_duplicates_are_irrelevant():
+    levels = _resolve_remote_levels([1.0], "snap-mean", [3, 1, 2, 1, 3])
+    assert levels.tolist() == [1.0, 2.0, 3.0]
+
+
+def test_snap_to_levels_preserves_nan_predictions():
+    levels = _resolve_remote_levels([1.0, 2.0, 3.0], "snap-mean", None)
+    snapped = _snap_to_levels([0.9, float("nan"), 2.6], levels)
     assert snapped[0] == 1.0 and snapped[2] == 3.0
     assert math.isnan(snapped[1])
 
