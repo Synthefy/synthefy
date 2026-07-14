@@ -595,6 +595,80 @@ def _load_local_predict() -> Any:
     return local_predict
 
 
+def _local_discretize_available() -> bool:
+    """Return ``True`` if the installed ``synthefy-nori`` supports discretization.
+
+    The ``discretize=`` / ``categorical_levels=`` arguments need a build that
+    ships the ``synthefy_nori.discretize`` module; probing with ``find_spec``
+    avoids importing (and thus loading) the package.
+    """
+    return importlib.util.find_spec("synthefy_nori.discretize") is not None
+
+
+# The one discretization strategy computable from the hosted endpoint's
+# response: it returns only point predictions (the distribution mean), and
+# "snap-mean" is by definition the nearest level to that mean — so snapping
+# client-side gives the same labels local mode would. Every other strategy
+# reads the full predictive distribution and needs local mode.
+_REMOTE_DISCRETIZE_METHOD = "snap-mean"
+
+
+def _resolve_remote_levels(
+    y_train: List[float],
+    discretize: Optional[str],
+    categorical_levels: Optional[VectorLike],
+) -> "np.ndarray":
+    """Validate remote discretization arguments and resolve the level lattice.
+
+    Called before the network request so an unsupported strategy or bad level
+    set fails fast instead of after a paid inference round-trip.
+    """
+    if discretize is None:
+        raise ValueError(
+            "categorical_levels without discretize= implies the package "
+            'default strategy ("map-cell"), which needs the full predictive '
+            "distribution — the hosted endpoint returns only point "
+            'predictions. Pass discretize="snap-mean" explicitly (nearest '
+            "level to the point prediction), or use local mode "
+            '(pip install "synthefy[local]") for the full strategy set.'
+        )
+    if discretize != _REMOTE_DISCRETIZE_METHOD:
+        raise ValueError(
+            f"discretize={discretize!r} needs the full predictive "
+            "distribution, which the hosted endpoint does not return; "
+            'remote mode supports discretize="snap-mean" (nearest level to '
+            "the returned point prediction). For the full strategy set, use "
+            'local mode (pip install "synthefy[local]").'
+        )
+    if categorical_levels is None:
+        levels = np.unique(np.asarray(y_train, dtype=float))
+        levels = levels[np.isfinite(levels)]
+        if levels.size == 0:
+            raise ValueError(
+                "y_train has no finite values to derive categorical levels "
+                "from; pass categorical_levels explicitly."
+            )
+    else:
+        levels = np.unique(np.asarray(categorical_levels, dtype=float).reshape(-1))
+        if levels.size == 0 or not np.all(np.isfinite(levels)):
+            raise ValueError(
+                "categorical_levels must be a non-empty sequence of finite "
+                f"numbers; got {categorical_levels!r}"
+            )
+    return levels
+
+
+def _snap_to_levels(predictions: List[float], levels: "np.ndarray") -> List[float]:
+    """Snap point predictions onto the level lattice."""
+    preds = np.asarray(predictions, dtype=float)
+    snapped = preds.copy()
+    finite = np.isfinite(preds)
+    # A NaN prediction stays NaN rather than becoming a confident label.
+    nearest = np.abs(preds[finite, None] - levels[None, :]).argmin(axis=1)
+    snapped[finite] = levels[nearest]
+    return snapped.tolist()
+
+
 class SynthefyNoriClient:
     """Client for Synthefy Nori in-context regression.
 
@@ -756,6 +830,8 @@ class SynthefyNoriClient:
         as_pandas: bool = False,
         max_categorical_cardinality: int = _DEFAULT_MAX_CARDINALITY,
         categorical_encoding: str = _DEFAULT_CATEGORICAL_ENCODING,
+        discretize: Optional[str] = None,
+        categorical_levels: Optional[VectorLike] = None,
         timeout: Optional[float] = None,
         extra_headers: Optional[Dict[str, str]] = None,
     ) -> Union[List[float], pd.Series]:
@@ -810,6 +886,31 @@ class SynthefyNoriClient:
             datasets and never widens the feature matrix. ``"onehot"``
             reproduces the previous client behavior (indicator columns per
             category, missing values get their own indicator).
+        discretize : str or None, optional
+            Declare a categorical/ordinal **target** (a 1–5 rating, a count, a
+            quality score) and pick the strategy that maps each prediction
+            onto the target's level lattice, so every returned value is one
+            the target can actually take. Strictly opt-in: nothing is snapped
+            unless ``discretize=`` or ``categorical_levels=`` is passed. In
+            local mode the full strategy set of the installed ``synthefy-nori``
+            is forwarded (``"map-cell"`` — accuracy-optimal, ``"median-cell"``
+            — MAE-optimal, ``"snap-mean"``, ``"snap-median"``,
+            ``"expected-level"``, ``"prior-match"``; see
+            ``synthefy_nori.discretize``). In remote mode the hosted endpoint
+            returns only point predictions, so ``"snap-mean"`` (nearest level
+            to the point prediction — identical to local ``"snap-mean"``) is
+            the one supported strategy; anything else raises ``ValueError``
+            with guidance. A ``NaN`` prediction stays ``NaN`` after snapping.
+        categorical_levels : array-like of float or None, optional
+            The complete set of values the target can take — its label set,
+            in classification terms. Values must be numeric; order and
+            duplicates are irrelevant (the set is normalized to sorted
+            distinct values). Defaults to the distinct values of
+            ``y_train``, which is leak-safe; pass it explicitly when the
+            context may under-cover the true scale (e.g. a 1–5 rating whose
+            context has no 1s). Passing it alone activates discretization
+            with the package default strategy in local mode (``"map-cell"``);
+            remote mode requires ``discretize="snap-mean"`` explicitly.
         timeout : float or None, optional
             Override the client timeout for this request (remote mode only;
             ignored in local mode).
@@ -832,11 +933,15 @@ class SynthefyNoriClient:
             numeric in one of ``X_train``/``X_test`` but not the other; if a
             column has unsupported ``timedelta`` dtype; if a non-DataFrame input
             contains non-numeric values; if ``categorical_encoding`` is not one
-            of ``"ordinal"``/``"onehot"``; or if featurization leaves no usable
-            columns.
+            of ``"ordinal"``/``"onehot"``; if featurization leaves no usable
+            columns; or, in remote mode, if ``discretize`` is a strategy other
+            than ``"snap-mean"`` (or ``categorical_levels`` is passed without
+            ``discretize=``, or is empty/non-finite).
         ImportError
             In local mode, if the optional ``synthefy-nori`` package is not
-            installed (with guidance to ``pip install "synthefy[local]"``).
+            installed (with guidance to ``pip install "synthefy[local]"``), or
+            if it is too old for ``discretize=``/``categorical_levels=``
+            (with an upgrade hint).
         BadRequestError
             In remote mode, if the server rejects the request (HTTP 400),
             carrying the server's ``error`` string as the message.
@@ -853,11 +958,22 @@ class SynthefyNoriClient:
             categorical_encoding=categorical_encoding,
         )
         if self.mode == "local":
-            predictions = self._predict_local(request)
+            predictions = self._predict_local(
+                request,
+                discretize=discretize,
+                categorical_levels=categorical_levels,
+            )
         else:
+            remote_levels = None
+            if discretize is not None or categorical_levels is not None:
+                remote_levels = _resolve_remote_levels(
+                    request.y_train, discretize, categorical_levels
+                )
             predictions = self._predict_remote(
                 request, timeout=timeout, extra_headers=extra_headers
             )
+            if remote_levels is not None:
+                predictions = _snap_to_levels(predictions, remote_levels)
         if as_pandas:
             return pd.Series(
                 predictions,
@@ -871,9 +987,26 @@ class SynthefyNoriClient:
     # Local mode
     # ------------------------------------------------------------------ #
 
-    def _predict_local(self, request: NoriPredictRequest) -> List[float]:
+    def _predict_local(
+        self,
+        request: NoriPredictRequest,
+        *,
+        discretize: Optional[str] = None,
+        categorical_levels: Optional[VectorLike] = None,
+    ) -> List[float]:
         local_predict = _load_local_predict()
         extra: Dict[str, Any] = {}
+        if discretize is not None or categorical_levels is not None:
+            if not _local_discretize_available():
+                raise ImportError(
+                    "Categorical-target discretization (discretize=/"
+                    "categorical_levels=) requires a newer synthefy-nori. "
+                    'Upgrade with: pip install -U "synthefy[local]".'
+                )
+            if discretize is not None:
+                extra["discretize"] = discretize
+            if categorical_levels is not None:
+                extra["categorical_levels"] = categorical_levels
         if self._local_variant is not None:
             # Selecting a non-base local variant needs a synthefy-nori that exposes the model=
             # selector; fail with a clear upgrade hint instead of an opaque TypeError on old builds.
