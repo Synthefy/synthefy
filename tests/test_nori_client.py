@@ -30,6 +30,7 @@ from synthefy.nori_client import (
     DEDICATED_ENDPOINT,
     GATEWAY_ENDPOINT,
     GATEWAY_MODEL,
+    _is_thinking_model,
     _resolve_remote_levels,
     _snap_to_levels,
 )
@@ -1012,6 +1013,69 @@ def test_local_variant_needs_model_selector_on_old_synthefy_nori(monkeypatch):
     client = SynthefyNoriClient(mode="local", model="nori-30m")
     with pytest.raises(ImportError, match="model= selector"):
         client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
+
+
+def test_gateway_slug_resolves_to_local_variant():
+    # The default gateway slug and an explicit 30M slug map to the right local checkpoint,
+    # not a raw-repo lookup, so slug users get the intended weights locally.
+    cbase = SynthefyNoriClient(api_key="k", model="synthefy/nori")
+    assert cbase.model == "synthefy/nori" and cbase._local_variant is None
+    c30 = SynthefyNoriClient(api_key="k", model="synthefy/nori-30m")
+    assert c30.model == "synthefy/nori-30m" and c30._local_variant == "nori-30m"
+
+
+# --------------------------------------------------------------------------- #
+# Nori Thinking is hosted-API only; no silent fallback to the base model
+# --------------------------------------------------------------------------- #
+
+
+def test_is_thinking_model_matches_every_tier():
+    for name in (
+        "synthefy/nori-30m-thinking",
+        "synthefy/nori-30m-thinking-medium",
+        "synthefy/nori-30m-thinking-high",
+        "nori-30m-thinking-medium",
+        "NORI-THINKING",
+    ):
+        assert _is_thinking_model(name)
+    for name in ("nori", "nori-6m", "nori-30m", "synthefy/nori", "synthefy/custom", None):
+        assert not _is_thinking_model(name)
+
+
+@pytest.mark.parametrize("mode", ["local", "auto"])
+@pytest.mark.parametrize(
+    "model", ["synthefy/nori-30m-thinking-medium", "nori-30m-thinking-medium"]
+)
+def test_thinking_model_raises_in_local_and_auto_modes(mode, model):
+    # Thinking has no local checkpoint: constructing for local/auto inference must raise a clear
+    # error (pointing at mode="remote"), never silently run the base ~6M model.
+    with pytest.raises(ValueError, match=r"Thinking.*hosted Synthefy API"):
+        SynthefyNoriClient(mode=mode, model=model)
+
+
+def test_thinking_model_allowed_in_remote_mode():
+    # Remote mode routes the Thinking slug straight to the gateway.
+    capture: Dict = {}
+    client = SynthefyNoriClient(
+        api_key="k", model="synthefy/nori-30m-thinking-medium"
+    )
+    assert client.model == "synthefy/nori-30m-thinking-medium"
+    _attach_mock(client, _ok_handler([1.0], capture))
+    client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
+    assert capture["body"]["model"] == "synthefy/nori-30m-thinking-medium"
+
+
+def test_unknown_model_raises_in_local_mode_no_base_fallback():
+    # A selector with no local checkpoint (a custom deployment slug) must raise in local mode
+    # rather than silently substituting the base model.
+    with pytest.raises(ValueError, match=r"no local checkpoint"):
+        SynthefyNoriClient(mode="local", model="synthefy/custom")
+
+
+def test_unknown_model_still_passes_through_in_remote_mode():
+    # The local guard is scoped to local mode; a custom slug is still a valid remote gateway id.
+    client = SynthefyNoriClient(api_key="k", model="synthefy/custom")
+    assert client.model == "synthefy/custom"
 
 
 # --------------------------------------------------------------------------- #
