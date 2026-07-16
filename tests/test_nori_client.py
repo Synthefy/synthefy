@@ -1062,9 +1062,9 @@ def test_thinking_model_raises_in_local_and_auto_modes(mode, model):
 @pytest.mark.parametrize(
     "friendly,slug",
     [
-        ("nori-30m-thinking", "synthefy/nori-30m-thinking"),
+        # Only the medium budget is deployed today; the bare name routes to it too.
+        ("nori-30m-thinking", "synthefy/nori-30m-thinking-medium"),
         ("nori-30m-thinking-medium", "synthefy/nori-30m-thinking-medium"),
-        ("nori-30m-thinking-high", "synthefy/nori-30m-thinking-high"),
     ],
 )
 def test_thinking_friendly_name_resolves_to_gateway_slug_remote(friendly, slug):

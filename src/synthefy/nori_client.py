@@ -60,9 +60,10 @@ NORI_VARIANTS = {
     "synthefy/nori": ("synthefy/nori", None),
     "synthefy/nori-30m": ("synthefy/nori-30m", "nori-30m"),
     # Thinking (test-time compute) -- hosted-API only; local/auto is refused by the thinking guard.
-    "nori-30m-thinking": ("synthefy/nori-30m-thinking", None),
+    # Only the medium budget is deployed today, so the bare name and "-medium" both route to it;
+    # add other budget tiers here when they ship.
+    "nori-30m-thinking": ("synthefy/nori-30m-thinking-medium", None),
     "nori-30m-thinking-medium": ("synthefy/nori-30m-thinking-medium", None),
-    "nori-30m-thinking-high": ("synthefy/nori-30m-thinking-high", None),
 }
 
 
@@ -771,12 +772,12 @@ class SynthefyNoriClient:
         slug (e.g. ``"synthefy/nori"``) is also accepted verbatim, and ``None`` targets a
         dedicated deployment (no ``model`` field in the body). Selecting a non-base variant in
         local mode requires a synthefy-nori build with the ``model=`` selector.
-        Nori Thinking variants — the friendly names ``"nori-30m-thinking"`` /
-        ``"nori-30m-thinking-medium"`` / ``"nori-30m-thinking-high"`` (or their
-        ``"synthefy/…"`` gateway slugs) — run only on the hosted API: passing one with
-        ``mode="local"`` or ``mode="auto"`` raises :class:`ValueError` rather than silently
-        running the base model — use ``mode="remote"``. Likewise a selector with no local
-        checkpoint (an unknown/custom slug) raises in local mode instead of falling back to
+        Nori Thinking — the friendly names ``"nori-30m-thinking"`` / ``"nori-30m-thinking-medium"``
+        (only the medium budget is deployed today; both route to it), or the
+        ``"synthefy/nori-30m-thinking-medium"`` gateway slug — runs only on the hosted API:
+        passing one with ``mode="local"`` or ``mode="auto"`` raises :class:`ValueError` rather
+        than silently running the base model — use ``mode="remote"``. Likewise a selector with no
+        local checkpoint (an unknown/custom slug) raises in local mode instead of falling back to
         the base model.
     auth_scheme : {"Bearer", "Api-Key"}, default "Bearer"
         HTTP ``Authorization`` scheme prefixed to the API key (remote mode). The
