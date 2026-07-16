@@ -48,15 +48,21 @@ GATEWAY_MODEL = "synthefy/nori"
 # names "nori"/"nori-6m" are the ~6M base (the default) and "nori-30m" is the ~29.2M variant; the
 # raw gateway slugs are listed too so the default ``model="synthefy/nori"`` and an explicit
 # "synthefy/nori-30m" load the right checkpoint locally instead of being treated as a raw HF repo.
-# Add one line per new *locally runnable* variant. Selectors absent here have no local checkpoint
-# (Nori Thinking, custom deployment slugs) -- local mode refuses them rather than silently
-# substituting the base model (see ``_resolve_local_variant``).
+# The "nori-30m-thinking*" entries are the test-time-compute (Thinking) variants: hosted-API only,
+# so they map a remote gateway slug but have NO local variant -- the thinking guard in __init__
+# refuses them in mode="local"/"auto" (their ``local_variant`` below is therefore never consulted).
+# A friendly name/slug absent here that reaches local mode has no local checkpoint and is refused
+# rather than silently running the base model (see ``_resolve_local_variant``).
 NORI_VARIANTS = {
     "nori": ("synthefy/nori", None),
     "nori-6m": ("synthefy/nori", None),
     "nori-30m": ("synthefy/nori-30m", "nori-30m"),
     "synthefy/nori": ("synthefy/nori", None),
     "synthefy/nori-30m": ("synthefy/nori-30m", "nori-30m"),
+    # Thinking (test-time compute) -- hosted-API only; local/auto is refused by the thinking guard.
+    "nori-30m-thinking": ("synthefy/nori-30m-thinking", None),
+    "nori-30m-thinking-medium": ("synthefy/nori-30m-thinking-medium", None),
+    "nori-30m-thinking-high": ("synthefy/nori-30m-thinking-high", None),
 }
 
 
@@ -765,11 +771,13 @@ class SynthefyNoriClient:
         slug (e.g. ``"synthefy/nori"``) is also accepted verbatim, and ``None`` targets a
         dedicated deployment (no ``model`` field in the body). Selecting a non-base variant in
         local mode requires a synthefy-nori build with the ``model=`` selector.
-        Nori Thinking variants (e.g. ``"synthefy/nori-30m-thinking-medium"``) run only on the
-        hosted API: passing one with ``mode="local"`` or ``mode="auto"`` raises
-        :class:`ValueError` rather than silently running the base model — use ``mode="remote"``.
-        Likewise a selector with no local checkpoint (an unknown/custom slug) raises in local
-        mode instead of falling back to the base model.
+        Nori Thinking variants — the friendly names ``"nori-30m-thinking"`` /
+        ``"nori-30m-thinking-medium"`` / ``"nori-30m-thinking-high"`` (or their
+        ``"synthefy/…"`` gateway slugs) — run only on the hosted API: passing one with
+        ``mode="local"`` or ``mode="auto"`` raises :class:`ValueError` rather than silently
+        running the base model — use ``mode="remote"``. Likewise a selector with no local
+        checkpoint (an unknown/custom slug) raises in local mode instead of falling back to
+        the base model.
     auth_scheme : {"Bearer", "Api-Key"}, default "Bearer"
         HTTP ``Authorization`` scheme prefixed to the API key (remote mode). The
         inference gateway requires ``"Bearer"``; dedicated deployments use
