@@ -721,6 +721,39 @@ def _snap_to_levels(predictions: List[float], levels: "np.ndarray") -> List[floa
     return snapped.tolist()
 
 
+def _widen_text_columns(X_train, X_test, text_columns, svd_dim, embedder,
+                        max_cardinality):
+    """Embed free-text columns client-side, returning widened numeric frames.
+
+    Uses ``synthefy_nori``'s ``MultimodalPreprocessor`` to turn the named text
+    columns into SVD features (fit on ``X_train`` only) appended to the numeric /
+    categorical block. Both inputs must be pandas DataFrames so the text columns
+    can be located by name; the result is fully numeric, so the ordinary request
+    path (which sends numeric matrices to any backend) is unchanged. The frames'
+    indexes are preserved for ``as_pandas`` output.
+    """
+    if not (isinstance(X_train, pd.DataFrame) and isinstance(X_test, pd.DataFrame)):
+        raise ValueError(
+            "text_columns requires X_train and X_test to be pandas DataFrames "
+            "(so the text columns can be located by name)."
+        )
+    try:
+        from synthefy_nori.text_features import MultimodalPreprocessor
+    except ImportError as e:  # pragma: no cover - dependency hint
+        raise ImportError(
+            "text_columns needs the text extra: install `pip install "
+            '"synthefy[text]"` (pulls synthefy-nori with sentence-transformers).'
+        ) from e
+    mm = MultimodalPreprocessor(
+        text_columns, svd_dim=svd_dim, embedder=embedder,
+        max_cardinality=max_cardinality,
+    )
+    Xtr = mm.fit_transform(X_train)   # numeric ndarray (numeric + categorical + text-SVD)
+    Xte = mm.transform(X_test)
+    return (pd.DataFrame(Xtr, index=X_train.index),
+            pd.DataFrame(Xte, index=X_test.index))
+
+
 class SynthefyNoriClient:
     """Client for Synthefy Nori in-context regression.
 
@@ -905,6 +938,9 @@ class SynthefyNoriClient:
         as_pandas: bool = False,
         max_categorical_cardinality: int = _DEFAULT_MAX_CARDINALITY,
         categorical_encoding: str = _DEFAULT_CATEGORICAL_ENCODING,
+        text_columns: Optional[Sequence[str]] = None,
+        svd_dim: Optional[int] = 128,
+        embedder: str = "minilm",
         discretize: Optional[str] = None,
         categorical_levels: Optional[VectorLike] = None,
         timeout: Optional[float] = None,
@@ -961,6 +997,20 @@ class SynthefyNoriClient:
             datasets and never widens the feature matrix. ``"onehot"``
             reproduces the previous client behavior (indicator columns per
             category, missing values get their own indicator).
+        text_columns : sequence of str or None, optional
+            Free-text columns to embed. When set (``X_train``/``X_test`` must be
+            DataFrames), those columns are embedded by a frozen sentence encoder,
+            reduced to ``svd_dim`` columns with a TruncatedSVD fit on ``X_train``,
+            and appended as numeric features — the request still carries a fully
+            numeric matrix, so every backend works unchanged. Needs the ``text``
+            extra (``pip install "synthefy[text]"``). ``None`` (default) leaves
+            behavior unchanged.
+        svd_dim : int or None, default 128
+            Number of SVD text columns appended (``None`` = full raw embedding).
+            Ignored when ``text_columns`` is None.
+        embedder : str, default "minilm"
+            Sentence-encoder short name (e.g. ``"minilm"``, ``"qwen4b"``) for
+            ``text_columns``. Ignored when ``text_columns`` is None.
         discretize : str or None, optional
             Declare a categorical/ordinal **target** (a 1–5 rating, a count, a
             quality score) and pick the strategy that maps each prediction
@@ -1027,6 +1077,14 @@ class SynthefyNoriClient:
         APIConnectionError
             In remote mode, if a network/connection error occurs.
         """
+        if text_columns:
+            # Embed free-text columns client-side into numeric SVD features, then
+            # send the widened numeric matrix through the normal request path
+            # (works identically for local / remote / dedicated backends).
+            X_train, X_test = _widen_text_columns(
+                X_train, X_test, list(text_columns), svd_dim, embedder,
+                max_categorical_cardinality,
+            )
         request = _build_nori_request(
             X_train, y_train, X_test, task,
             max_categorical_cardinality=max_categorical_cardinality,
