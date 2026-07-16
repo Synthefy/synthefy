@@ -1256,3 +1256,48 @@ def test_local_discretize_real_inference():
     preds = client.predict(X_train, y_train, X_test, discretize="map-cell")
     levels = set(np.unique(y_train).tolist())
     assert all(p in levels for p in preds)
+
+
+# --------------------------------------------------------------------------- #
+# Text features -- client-side embedding (text_columns=...)
+# --------------------------------------------------------------------------- #
+
+def _fake_embed(texts):
+    """Deterministic 8-d embedding, so tests need no sentence-transformers/model."""
+    import hashlib
+    out = []
+    for t in texts:
+        h = hashlib.sha1(t.encode("utf-8")).digest()
+        out.append(np.frombuffer(h[:8], dtype=np.uint8).astype(np.float32) / 255.0)
+    return np.stack(out)
+
+
+def test_text_columns_embeds_client_side_and_sends_numeric():
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0, 2.0], capture))
+
+    df_train = pd.DataFrame({
+        "x1": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "brand": ["a", "b", "a", "b", "a", "b"],           # categorical -> 1 col
+        "review": ["good", "bad", "ok", "great", "poor", "fine"],  # text -> SVD
+    })
+    df_test = pd.DataFrame({"x1": [1.5, 5.5], "brand": ["a", "b"],
+                            "review": ["nice", "awful"]})
+
+    preds = client.predict(df_train, [1., 2., 3., 4., 5., 6.], df_test,
+                           text_columns=["review"], svd_dim=4, embedder=_fake_embed)
+
+    assert preds == [1.0, 2.0]
+    # x1 (numeric) + brand (1 categorical col) + 4 SVD text cols = 6 numeric features
+    assert len(capture["body"]["X_train"][0]) == 6
+    assert len(capture["body"]["X_test"][0]) == 6
+    # the payload is fully numeric (text was embedded away client-side)
+    assert all(isinstance(v, (int, float)) for row in capture["body"]["X_test"] for v in row)
+
+
+def test_text_columns_requires_dataframe():
+    client = SynthefyNoriClient(api_key="test-key")
+    _attach_mock(client, _ok_handler([1.0], {}))
+    with pytest.raises(ValueError):
+        client.predict([[1.0, 2.0]], [1.0], [[1.0, 2.0]], text_columns=["review"])
