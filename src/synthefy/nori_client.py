@@ -43,27 +43,72 @@ GATEWAY_BASE_URL = "https://inference.baseten.co"
 GATEWAY_ENDPOINT = "/predict"
 GATEWAY_MODEL = "synthefy/nori"
 
-# Friendly Nori size selector -> (remote gateway model slug, local variant name passed to the
-# synthefy-nori ``model=`` selector). "nori"/"nori-6m" are the ~6M base (the default); "nori-30m"
-# is the ~29.2M variant. A raw slug or ``None`` (dedicated endpoint) passes through unchanged;
-# local inference then uses the base checkpoint. Add one line per new variant.
+# Nori model selector -> (remote gateway model slug, local variant name passed to the
+# synthefy-nori ``model=`` selector; ``None`` = the default base ~6M checkpoint). The friendly
+# names "nori"/"nori-6m" are the ~6M base (the default) and "nori-30m" is the ~29.2M variant; the
+# raw gateway slugs are listed too so the default ``model="synthefy/nori"`` and an explicit
+# "synthefy/nori-30m" load the right checkpoint locally instead of being treated as a raw HF repo.
+# Add one line per new *locally runnable* variant. Selectors absent here have no local checkpoint
+# (Nori Thinking, custom deployment slugs) -- local mode refuses them rather than silently
+# substituting the base model (see ``_resolve_local_variant``).
 NORI_VARIANTS = {
     "nori": ("synthefy/nori", None),
     "nori-6m": ("synthefy/nori", None),
     "nori-30m": ("synthefy/nori-30m", "nori-30m"),
+    "synthefy/nori": ("synthefy/nori", None),
+    "synthefy/nori-30m": ("synthefy/nori-30m", "nori-30m"),
 }
 
 
-def _resolve_variant(model: Optional[str]) -> tuple:
-    """Map a friendly variant name to ``(gateway_model, local_variant)``.
+def _is_thinking_model(model: Optional[str]) -> bool:
+    """Return ``True`` if ``model`` names a Nori Thinking (test-time-compute) variant.
 
-    A known name resolves via :data:`NORI_VARIANTS`; anything else (a raw gateway slug, or
-    ``None`` for a dedicated endpoint) passes through as the gateway model with the base
-    checkpoint locally.
+    Thinking variants (gateway slugs like ``"synthefy/nori-30m-thinking-medium"``) spend extra
+    inference to lift accuracy and run **only** on the hosted API -- there is no local checkpoint
+    for them. Matching on the ``"thinking"`` token covers every budget tier (``-thinking``,
+    ``-thinking-medium``, ``-thinking-high``) and both the friendly and slug spellings.
+    """
+    return model is not None and "thinking" in model.lower()
+
+
+def _resolve_variant(model: Optional[str]) -> tuple:
+    """Map a model selector to ``(gateway_model, local_variant)``.
+
+    A known name or slug resolves via :data:`NORI_VARIANTS`; anything else (a custom gateway
+    slug, or ``None`` for a dedicated endpoint) passes through as the gateway model. The
+    ``local_variant`` is what local mode would forward to synthefy-nori's ``model=`` selector,
+    but whether a selector is actually runnable locally is enforced by
+    :func:`_resolve_local_variant`, not here -- this function never raises.
     """
     if model is not None and model in NORI_VARIANTS:
         return NORI_VARIANTS[model]
     return model, None
+
+
+def _resolve_local_variant(model: Optional[str]) -> Optional[str]:
+    """Resolve the synthefy-nori ``model=`` value for local inference, or raise if impossible.
+
+    ``None``/``"nori"``/``"nori-6m"`` (and the base gateway slug) run the default ~6M checkpoint;
+    ``"nori-30m"`` runs the 29.2M checkpoint. Any other selector has no local checkpoint, so this
+    raises :class:`ValueError` instead of silently falling back to the base model -- a Nori
+    Thinking variant gets a message pointing at the hosted API, everything else a message listing
+    the locally runnable options.
+    """
+    if _is_thinking_model(model):
+        raise ValueError(
+            f"model={model!r} is a Nori Thinking (test-time-compute) variant, which runs only "
+            "on the hosted Synthefy API and has no local checkpoint. Use mode='remote' with a "
+            "Baseten API key to run Thinking, or select 'nori'/'nori-6m'/'nori-30m' for local "
+            "inference."
+        )
+    if model is None or model in NORI_VARIANTS:
+        return _resolve_variant(model)[1]
+    raise ValueError(
+        f"model={model!r} has no local checkpoint and cannot run in mode='local'. Local "
+        "inference supports the base model ('nori'/'nori-6m') and 'nori-30m'. For hosted-only "
+        "variants (e.g. Nori Thinking) or a custom deployment slug, use mode='remote' with a "
+        "Baseten API key."
+    )
 
 
 # Dedicated endpoint: a specific production deployment; body carries no "model".
@@ -720,6 +765,11 @@ class SynthefyNoriClient:
         slug (e.g. ``"synthefy/nori"``) is also accepted verbatim, and ``None`` targets a
         dedicated deployment (no ``model`` field in the body). Selecting a non-base variant in
         local mode requires a synthefy-nori build with the ``model=`` selector.
+        Nori Thinking variants (e.g. ``"synthefy/nori-30m-thinking-medium"``) run only on the
+        hosted API: passing one with ``mode="local"`` or ``mode="auto"`` raises
+        :class:`ValueError` rather than silently running the base model — use ``mode="remote"``.
+        Likewise a selector with no local checkpoint (an unknown/custom slug) raises in local
+        mode instead of falling back to the base model.
     auth_scheme : {"Bearer", "Api-Key"}, default "Bearer"
         HTTP ``Authorization`` scheme prefixed to the API key (remote mode). The
         inference gateway requires ``"Bearer"``; dedicated deployments use
@@ -772,18 +822,34 @@ class SynthefyNoriClient:
                 f"auth_scheme must be one of {_VALID_AUTH_SCHEMES}; "
                 f"got {auth_scheme!r}"
             )
+        requested_mode = mode
         if mode == "auto":
             mode = "local" if _local_available() else "remote"
         self.mode: str = mode
+
+        # Nori Thinking runs only on the hosted API; refuse it in any non-remote mode (mode="local"
+        # or mode="auto") instead of silently running the base model. Checked against the *requested*
+        # mode so the guard is deterministic (it does not depend on whether synthefy-nori happens to
+        # be installed, which is what mode="auto" resolves on).
+        if _is_thinking_model(model) and requested_mode != "remote":
+            raise ValueError(
+                f"model={model!r} is a Nori Thinking (test-time-compute) variant, which runs only "
+                f"on the hosted Synthefy API. Set mode='remote' with a Baseten API key to use it "
+                f"(mode={requested_mode!r} resolves to local inference, which has no Thinking "
+                f"checkpoint)."
+            )
 
         self.timeout = timeout
         self.max_retries = max_retries
         self.base_url = base_url
         self.endpoint = endpoint
-        # Resolve the variant selector: a friendly name ("nori"/"nori-6m"/"nori-30m") maps to a
-        # remote gateway slug + a local variant; a raw slug or None passes through. self.model is
-        # the gateway model id sent in the remote body (unchanged semantics for raw slugs/None).
+        # self.model is the gateway model id sent in the remote body: a friendly name maps to its
+        # slug, a raw slug or None passes through. In local mode we additionally resolve -- and
+        # validate -- the local checkpoint selector, which raises for a selector that has no local
+        # checkpoint rather than silently substituting the base model.
         self.model, self._local_variant = _resolve_variant(model)
+        if mode == "local":
+            self._local_variant = _resolve_local_variant(model)
         self.auth_scheme = auth_scheme
         self.user_agent = (
             user_agent or f"synthefy-python httpx/{httpx.__version__}"
