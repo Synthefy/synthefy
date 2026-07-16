@@ -1044,7 +1044,13 @@ def test_is_thinking_model_matches_every_tier():
 
 @pytest.mark.parametrize("mode", ["local", "auto"])
 @pytest.mark.parametrize(
-    "model", ["synthefy/nori-30m-thinking-medium", "nori-30m-thinking-medium"]
+    "model",
+    [
+        "synthefy/nori-30m-thinking-medium",  # raw gateway slug
+        "nori-30m-thinking",                  # friendly aliases (every tier)
+        "nori-30m-thinking-medium",
+        "nori-30m-thinking-high",
+    ],
 )
 def test_thinking_model_raises_in_local_and_auto_modes(mode, model):
     # Thinking has no local checkpoint: constructing for local/auto inference must raise a clear
@@ -1053,16 +1059,23 @@ def test_thinking_model_raises_in_local_and_auto_modes(mode, model):
         SynthefyNoriClient(mode=mode, model=model)
 
 
-def test_thinking_model_allowed_in_remote_mode():
-    # Remote mode routes the Thinking slug straight to the gateway.
+@pytest.mark.parametrize(
+    "friendly,slug",
+    [
+        # Only the medium budget is deployed today; the bare name routes to it too.
+        ("nori-30m-thinking", "synthefy/nori-30m-thinking-medium"),
+        ("nori-30m-thinking-medium", "synthefy/nori-30m-thinking-medium"),
+    ],
+)
+def test_thinking_friendly_name_resolves_to_gateway_slug_remote(friendly, slug):
+    # In remote mode the friendly Thinking name maps to its gateway slug (uniform with nori-30m),
+    # so callers never need the raw "synthefy/" prefix.
     capture: Dict = {}
-    client = SynthefyNoriClient(
-        api_key="k", model="synthefy/nori-30m-thinking-medium"
-    )
-    assert client.model == "synthefy/nori-30m-thinking-medium"
+    client = SynthefyNoriClient(api_key="k", model=friendly)  # remote (default)
+    assert client.model == slug
     _attach_mock(client, _ok_handler([1.0], capture))
     client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
-    assert capture["body"]["model"] == "synthefy/nori-30m-thinking-medium"
+    assert capture["body"]["model"] == slug
 
 
 def test_unknown_model_raises_in_local_mode_no_base_fallback():
