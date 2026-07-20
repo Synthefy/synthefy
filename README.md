@@ -256,6 +256,48 @@ endpoint, different credential) but is exported from the same package. A single
 locally, selected with the `mode` argument (`"remote"` (default), `"local"`, or
 `"auto"`).
 
+### Use it from your AI coding assistant
+
+Paste this into Claude Code, Cursor, or any AI coding assistant and it will wire
+Nori into your own project:
+
+````text
+Look at my code/task/report here and figure out where Nori would best fit — it's
+Synthefy's tabular foundation model for regression, used through the `synthefy`
+client with no training loop and no hyperparameters. It runs fully on your own
+machine (local mode, uses your GPU when one's available), or against the hosted
+Synthefy API if you'd rather not run it locally.
+
+1. Install it with this project's package manager, with the local extra
+   (e.g. `uv add "synthefy[local]"`, or `pip install -U "synthefy[local]"`).
+
+2. Use it wherever a tabular regression / prediction step fits:
+
+   ```python
+   from synthefy import SynthefyNoriClient
+
+   client = SynthefyNoriClient(mode="local")   # runs on this machine, no API key
+   # "nori-30m" for the larger, stronger variant:
+   # client = SynthefyNoriClient(mode="local", model="nori-30m")
+
+   y_pred = client.predict(
+       X_train=X_train,   # lists, numpy arrays, or pandas — NaNs OK, imputed for you
+       y_train=y_train,   # continuous target
+       X_test=X_test,     # rows to score
+   )                      # -> list of floats, one per X_test row (as_pandas=True for a Series)
+   ```
+
+X is a numeric feature matrix (or a pandas DataFrame — non-numeric columns are
+encoded for you); y is a continuous target. If I already have a model, wire Nori
+up alongside it on the same train/test split and metric so I can compare them. If
+the best place to plug Nori in isn't obvious, show me where you'd put it and
+confirm with me before making changes.
+
+Prefer not to run it locally? Use the hosted API instead — sign up for a Baseten
+API key at https://docs.synthefy.com/setup/api_key, then:
+`client = SynthefyNoriClient(api_key="YOUR_BASETEN_API_KEY")` (or set BASETEN_API_KEY).
+````
+
 ### Hosted Usage (`mode="remote"`)
 
 ```python
