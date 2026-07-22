@@ -28,8 +28,8 @@ from synthefy.api_client import (
 from synthefy.nori_client import (
     DEDICATED_BASE_URL,
     DEDICATED_ENDPOINT,
-    DEFAULT_MODEL,
     GATEWAY_ENDPOINT,
+    GATEWAY_MODEL,
     NORI_VARIANTS,
     _is_thinking_model,
     _resolve_remote_levels,
@@ -88,8 +88,8 @@ def test_predict_returns_predictions_and_sends_expected_request():
     assert body["y_train"] == [1.0, 1.0, 2.0]
     assert body["X_test"] == [[2.0, 2.0], [3.0, 3.0]]
     assert body["task"] == "regression"
-    # Default model is the 30M variant; the body carries its resolved gateway slug.
-    assert body["model"] == NORI_VARIANTS[DEFAULT_MODEL][0]
+    # Default selector is the base gateway slug (mapped server-side to the 30M deployment).
+    assert body["model"] == GATEWAY_MODEL
 
 
 def test_predict_accepts_numpy_arrays():
@@ -972,9 +972,11 @@ def test_model_variant_resolves_gateway_and_local():
     assert cnone.model is None and cnone._local_variant is None
 
 
-def test_default_model_is_nori_30m():
+def test_default_model_maps_to_30m():
+    # Default selector is the base gateway slug, which is mapped to the 30M deployment
+    # (remote) and resolves to the 30M checkpoint (local).
     c = SynthefyNoriClient(api_key="k")
-    assert c.model == "synthefy/nori-30m"
+    assert c.model == GATEWAY_MODEL           # "synthefy/nori"
     assert c._local_variant == "nori-30m"
 
 

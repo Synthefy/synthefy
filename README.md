@@ -365,7 +365,7 @@ preds = client.predict(X_train, y_train, X_test, as_pandas=True)
 ```
 
 By default the client targets the Baseten inference **gateway**
-(`https://inference.baseten.co/predict`, model `synthefy/nori-30m`). To
+(`https://inference.baseten.co/predict`, model `synthefy/nori`, mapped to the 30M deployment). To
 target a **dedicated** deployment instead, point `base_url`/`endpoint` at it and
 set `model=None` (the dedicated endpoint takes the body verbatim, with no `model`
 field):
@@ -483,7 +483,7 @@ continuous mean is already optimal for those metrics.
 
 ### SynthefyNoriClient (Tabular Regression)
 
-- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model="nori-30m", user_agent=None)`
+- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model="synthefy/nori", user_agent=None)`
   - `mode`: `"remote"` (hosted, default), `"local"` (in-process via
     `synthefy-nori`), or `"auto"` (local if installed, else remote).
   - `api_key` (remote mode) falls back to the `BASETEN_API_KEY` environment

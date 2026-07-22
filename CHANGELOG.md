@@ -10,11 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Default Nori model is now the ~29.2M 30M variant**, was the ~6M base.
-  `SynthefyNoriClient()` with no `model=` now runs the 30M model in both remote and local
-  mode — the single `DEFAULT_MODEL` constant resolves through the `NORI_VARIANTS` registry,
-  so one selector drives the gateway slug and the local checkpoint alike.
-- **`nori` now means the 30M default; the `synthefy/nori` gateway slug is mapped to the 30M
-  deployment.** `"nori"` / `"nori-30m"` / `"synthefy/nori"` / `"synthefy/nori-30m"` all run 30M.
+  `SynthefyNoriClient()` with no `model=` now runs 30M in both modes: the default selector
+  `synthefy/nori` is mapped to the 30M deployment (remote) and resolves to the 30M checkpoint
+  (local) via `NORI_VARIANTS`.
+- **`nori` / `synthefy/nori` now mean 30M.** `"nori"` / `"nori-30m"` / `"synthefy/nori"` /
+  `"synthefy/nori-30m"` all run 30M.
 - **Pass `model="nori-6m"` for the ~6M base** — served by its own `synthefy/nori-6m` gateway
   slug (`"nori-6m"` / `"synthefy/nori-6m"`).
 
