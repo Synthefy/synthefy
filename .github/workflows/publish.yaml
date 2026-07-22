@@ -41,8 +41,30 @@ jobs:
         with:
           version: "latest"
 
+      - name: Verify pyproject and __init__ versions agree
+        run: |
+          pyproject_version=$(grep -m1 -E '^version *= *"' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          init_version=$(grep -m1 -E '^__version__ *= *"' src/synthefy/__init__.py | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "pyproject=$pyproject_version __init__=$init_version"
+          if [ "$pyproject_version" != "$init_version" ]; then
+            echo "pyproject.toml version ($pyproject_version) != src/synthefy/__init__.py __version__ ($init_version)" >&2
+            exit 1
+          fi
+
       - name: Build sdist and wheel
         run: uv build
+
+      - name: Verify built version matches release tag
+        if: github.event_name == 'release'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          wheel=$(basename dist/synthefy-*.whl)
+          pkg_version=$(echo "$wheel" | awk -F- '{print $2}')
+          echo "tag=$tag pkg_version=$pkg_version wheel=$wheel"
+          if [ "$tag" != "$pkg_version" ]; then
+            echo "Tag $tag does not match package version $pkg_version" >&2
+            exit 1
+          fi
 
       - name: Upload distributions
         uses: actions/upload-artifact@v4
