@@ -955,10 +955,13 @@ def test_model_variant_resolves_gateway_and_local():
     assert c30.model == "synthefy/nori-30m"
     assert c30._local_variant == "nori-30m"
 
-    # "nori" / "nori-6m" are the ~6M base: base gateway, no local variant override
-    for name in ("nori", "nori-6m"):
-        c = SynthefyNoriClient(api_key="k", model=name)
-        assert c.model == "synthefy/nori" and c._local_variant is None
+    # "nori" is the default: its synthefy/nori gateway slug is mapped to the 30M deployment
+    cdef = SynthefyNoriClient(api_key="k", model="nori")
+    assert cdef.model == "synthefy/nori" and cdef._local_variant == "nori-30m"
+
+    # "nori-6m" is the pinned ~6M base: its own gateway slug, no local variant override
+    c6 = SynthefyNoriClient(api_key="k", model="nori-6m")
+    assert c6.model == "synthefy/nori-6m" and c6._local_variant is None
 
     # a raw gateway slug passes through unchanged
     craw = SynthefyNoriClient(api_key="k", model="synthefy/custom")
@@ -1004,7 +1007,7 @@ def test_local_mode_base_does_not_force_a_variant(monkeypatch):
         return [0.0]
 
     monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
-    client = SynthefyNoriClient(mode="local", model="nori")  # base 6M
+    client = SynthefyNoriClient(mode="local", model="nori-6m")  # base 6M
     client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
     assert seen["model"] == "__unset__"  # model= not passed → predict() uses its own default
 
@@ -1020,10 +1023,12 @@ def test_local_variant_needs_model_selector_on_old_synthefy_nori(monkeypatch):
 
 
 def test_gateway_slug_resolves_to_local_variant():
-    # The default gateway slug and an explicit 30M slug map to the right local checkpoint,
-    # not a raw-repo lookup, so slug users get the intended weights locally.
-    cbase = SynthefyNoriClient(api_key="k", model="synthefy/nori")
-    assert cbase.model == "synthefy/nori" and cbase._local_variant is None
+    # Gateway slugs map to the right local checkpoint, not a raw-repo lookup, so slug users get
+    # the intended weights locally. synthefy/nori is mapped to 30M; synthefy/nori-6m is the base.
+    cbase = SynthefyNoriClient(api_key="k", model="synthefy/nori-6m")
+    assert cbase.model == "synthefy/nori-6m" and cbase._local_variant is None
+    cdef = SynthefyNoriClient(api_key="k", model="synthefy/nori")
+    assert cdef.model == "synthefy/nori" and cdef._local_variant == "nori-30m"
     c30 = SynthefyNoriClient(api_key="k", model="synthefy/nori-30m")
     assert c30.model == "synthefy/nori-30m" and c30._local_variant == "nori-30m"
 

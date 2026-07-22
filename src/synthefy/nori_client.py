@@ -44,20 +44,22 @@ GATEWAY_ENDPOINT = "/predict"
 GATEWAY_MODEL = "synthefy/nori"
 
 # Nori model selector -> (remote gateway model slug, local variant name passed to the
-# synthefy-nori ``model=`` selector; ``None`` = the default base ~6M checkpoint). The friendly
-# names "nori"/"nori-6m" are the ~6M base and "nori-30m" is the ~29.2M variant (the default; see
-# DEFAULT_MODEL below). The raw gateway slugs are listed too so both ``model="synthefy/nori"`` and
-# "synthefy/nori-30m" load the right checkpoint locally instead of being treated as a raw HF repo.
+# synthefy-nori ``model=`` selector; ``None`` = the base ~6M checkpoint). "nori" is the default
+# (~29.2M): its ``synthefy/nori`` gateway slug is mapped to the 30M deployment, so "nori" and
+# "nori-30m" both serve 30M. "nori-6m" / ``synthefy/nori-6m`` is the pinned ~6M base (its own
+# gateway slug + the base local checkpoint). The raw gateway slugs are listed too so they load
+# the right checkpoint locally instead of being treated as a raw HF repo.
 # The "nori-30m-thinking*" entries are the test-time-compute (Thinking) variants: hosted-API only,
 # so they map a remote gateway slug but have NO local variant -- the thinking guard in __init__
 # refuses them in mode="local"/"auto" (their ``local_variant`` below is therefore never consulted).
 # A friendly name/slug absent here that reaches local mode has no local checkpoint and is refused
 # rather than silently running the base model (see ``_resolve_local_variant``).
 NORI_VARIANTS = {
-    "nori": ("synthefy/nori", None),
-    "nori-6m": ("synthefy/nori", None),
+    "nori": ("synthefy/nori", "nori-30m"),
+    "nori-6m": ("synthefy/nori-6m", None),
     "nori-30m": ("synthefy/nori-30m", "nori-30m"),
-    "synthefy/nori": ("synthefy/nori", None),
+    "synthefy/nori": ("synthefy/nori", "nori-30m"),
+    "synthefy/nori-6m": ("synthefy/nori-6m", None),
     "synthefy/nori-30m": ("synthefy/nori-30m", "nori-30m"),
     # Thinking (test-time compute) -- hosted-API only; local/auto is refused by the thinking guard.
     # Only the medium budget is deployed today, so the bare name and "-medium" both route to it;
@@ -100,8 +102,8 @@ def _resolve_variant(model: Optional[str]) -> tuple:
 def _resolve_local_variant(model: Optional[str]) -> Optional[str]:
     """Resolve the synthefy-nori ``model=`` value for local inference, or raise if impossible.
 
-    ``None``/``"nori"``/``"nori-6m"`` (and the base gateway slug) run the default ~6M checkpoint;
-    ``"nori-30m"`` runs the 29.2M checkpoint. Any other selector has no local checkpoint, so this
+    ``None``/``"nori-6m"``/``"synthefy/nori-6m"`` run the ~6M base checkpoint; ``"nori"``/
+    ``"nori-30m"`` (the default) run the 29.2M checkpoint. Any other selector has no local checkpoint, so this
     raises :class:`ValueError` instead of silently falling back to the base model -- a Nori
     Thinking variant gets a message pointing at the hosted API, everything else a message listing
     the locally runnable options.
@@ -804,10 +806,10 @@ class SynthefyNoriClient:
     endpoint : str, default GATEWAY_ENDPOINT
         Path appended to ``base_url`` for predictions (remote mode).
     model : str or None, default ``"nori-30m"``
-        Which Nori to run. Accepts a friendly size selector — ``"nori-30m"`` (the ~29.2M
-        variant, the default) or ``"nori"`` / ``"nori-6m"`` (the ~6M base) — which selects
+        Which Nori to run. Accepts a friendly size selector — ``"nori"`` / ``"nori-30m"``
+        (the ~29.2M variant, the default) or ``"nori-6m"`` (the ~6M base) — which selects
         both the remote gateway deployment and, in local mode, the checkpoint. A raw gateway
-        slug (e.g. ``"synthefy/nori"``) is also accepted verbatim, and ``None`` targets a
+        slug (e.g. ``"synthefy/nori-6m"``) is also accepted verbatim, and ``None`` targets a
         dedicated deployment (no ``model`` field in the body). Selecting a non-base variant in
         local mode requires a synthefy-nori build with the ``model=`` selector.
         Nori Thinking — the friendly names ``"nori-30m-thinking"`` / ``"nori-30m-thinking-medium"``
