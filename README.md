@@ -276,9 +276,8 @@ Synthefy API if you'd rather not run it locally.
    ```python
    from synthefy import SynthefyNoriClient
 
-   client = SynthefyNoriClient(mode="local")   # runs on this machine, no API key
-   # Defaults to the ~29.2M "nori-30m" variant. For the smaller ~6M base:
-   # client = SynthefyNoriClient(mode="local", model="nori-6m")
+   # model is required -- name a size: "nori-30m" (~29.2M) or "nori-6m" (~6M base).
+   client = SynthefyNoriClient(mode="local", model="nori-30m")   # runs on this machine, no API key
 
    y_pred = client.predict(
        X_train=X_train,   # lists, numpy arrays, or pandas — NaNs OK, imputed for you
@@ -365,7 +364,8 @@ preds = client.predict(X_train, y_train, X_test, as_pandas=True)
 ```
 
 By default the client targets the Baseten inference **gateway**
-(`https://inference.baseten.co/predict`, model `synthefy/nori`, mapped to the 30M deployment). To
+(`https://inference.baseten.co/predict`); `model=` is required and names a size —
+`"nori-30m"` (→ `synthefy/nori-30m`) or `"nori-6m"` (→ `synthefy/nori-6m`). To
 target a **dedicated** deployment instead, point `base_url`/`endpoint` at it and
 set `model=None` (the dedicated endpoint takes the body verbatim, with no `model`
 field):
@@ -483,7 +483,7 @@ continuous mean is already optimal for those metrics.
 
 ### SynthefyNoriClient (Tabular Regression)
 
-- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model="synthefy/nori", user_agent=None)`
+- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None)` — `model` is **required** (`"nori-6m"` / `"nori-30m"`; `None` for a dedicated endpoint)
   - `mode`: `"remote"` (hosted, default), `"local"` (in-process via
     `synthefy-nori`), or `"auto"` (local if installed, else remote).
   - `api_key` (remote mode) falls back to the `BASETEN_API_KEY` environment

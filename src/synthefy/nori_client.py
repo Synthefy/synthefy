@@ -41,28 +41,28 @@ from synthefy.api_client import (
 # Gateway endpoint (default): routes to the model by name, body carries "model".
 GATEWAY_BASE_URL = "https://inference.baseten.co"
 GATEWAY_ENDPOINT = "/predict"
-GATEWAY_MODEL = "synthefy/nori"
+
+# Sentinel for a required ``model=`` (there is no default -- every caller names a size). Kept
+# distinct from ``None``, which is a valid, meaningful value: a dedicated deployment endpoint that
+# omits "model" from the request body.
+_MODEL_REQUIRED: Any = object()
 
 # Model registry. Maps a ``model=`` selector -> ``(remote_gateway_slug, local_variant)``:
 #   key                 = what the caller passes as ``model=`` (a friendly name or a raw gateway slug)
 #   remote_gateway_slug = the "model" string sent in the gateway request body (remote mode)
-#   local_variant       = the name forwarded to synthefy-nori's ``model=`` selector (local mode);
-#                         ``None`` = no override, i.e. the package's own default (the 30M variant)
-# "nori" is the default (~29.2M): its ``synthefy/nori`` gateway slug is mapped to the 30M deployment,
-# so "nori" and "nori-30m" both serve 30M. "nori-6m" / ``synthefy/nori-6m`` is the pinned ~6M base;
-# it forwards ``local_variant="nori-6m"`` so local mode loads the base even though the package now
-# defaults to 30M. The raw gateway slugs are listed too so they load the right checkpoint locally
-# instead of being treated as a raw HF repo.
+#   local_variant       = the name forwarded to synthefy-nori's ``model=`` selector (local mode)
+# Every selector names its size -- there is no bare "nori"/"synthefy/nori", so a slug never silently
+# changes which model it serves (``model=`` is required; see the constructor). "nori-6m" is the ~6M
+# base; "nori-30m" is the ~29.2M variant. The raw gateway slugs are listed too so they load the
+# right checkpoint locally instead of being treated as a raw HF repo.
 # The "nori-30m-thinking*" entries are the test-time-compute (Thinking) variants: hosted-API only,
 # so they map a remote gateway slug but have NO local variant -- the thinking guard in __init__
 # refuses them in mode="local"/"auto" (their ``local_variant`` below is therefore never consulted).
 # A friendly name/slug absent here that reaches local mode has no local checkpoint and is refused
-# rather than silently running the base model (see ``_resolve_local_variant``).
+# rather than silently running a different model (see ``_resolve_local_variant``).
 NORI_VARIANTS = {
-    "nori": ("synthefy/nori", "nori-30m"),
     "nori-6m": ("synthefy/nori-6m", "nori-6m"),
     "nori-30m": ("synthefy/nori-30m", "nori-30m"),
-    "synthefy/nori": ("synthefy/nori", "nori-30m"),
     "synthefy/nori-6m": ("synthefy/nori-6m", "nori-6m"),
     "synthefy/nori-30m": ("synthefy/nori-30m", "nori-30m"),
     # Thinking (test-time compute) -- hosted-API only; local/auto is refused by the thinking guard.
@@ -805,13 +805,14 @@ class SynthefyNoriClient:
         Base URL of the inference host (remote mode).
     endpoint : str, default GATEWAY_ENDPOINT
         Path appended to ``base_url`` for predictions (remote mode).
-    model : str or None, default ``GATEWAY_MODEL`` (``"synthefy/nori"``, mapped to the 30M deployment)
-        Which Nori to run. Accepts a friendly size selector — ``"nori"`` / ``"nori-30m"``
-        (the ~29.2M variant, the default) or ``"nori-6m"`` (the ~6M base) — which selects
-        both the remote gateway deployment and, in local mode, the checkpoint. A raw gateway
-        slug (e.g. ``"synthefy/nori-6m"``) is also accepted verbatim, and ``None`` targets a
-        dedicated deployment (no ``model`` field in the body). Selecting a non-base variant in
-        local mode requires a synthefy-nori build with the ``model=`` selector.
+    model : str or None, REQUIRED
+        Which Nori to run — there is no default; every request names a size. Pass a friendly
+        size selector — ``"nori-6m"`` (the ~6M base) or ``"nori-30m"`` (the ~29.2M variant) —
+        which selects both the remote gateway deployment and, in local mode, the checkpoint. A
+        raw gateway slug (e.g. ``"synthefy/nori-30m"``) is also accepted verbatim, and ``None``
+        targets a dedicated deployment (no ``model`` field in the body). Omitting ``model``
+        entirely raises :class:`ValueError`. Selecting a variant in local mode requires a
+        synthefy-nori build with the ``model=`` selector.
         Nori Thinking — the friendly names ``"nori-30m-thinking"`` / ``"nori-30m-thinking-medium"``
         (only the medium budget is deployed today; both route to it), or the
         ``"synthefy/nori-30m-thinking-medium"`` gateway slug — runs only on the hosted API:
@@ -835,7 +836,7 @@ class SynthefyNoriClient:
     Examples
     --------
     >>> from synthefy import SynthefyNoriClient
-    >>> client = SynthefyNoriClient(api_key="...")  # or BASETEN_API_KEY
+    >>> client = SynthefyNoriClient(api_key="...", model="nori-30m")  # or BASETEN_API_KEY
     >>> preds = client.predict(
     ...     X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
     ...     y_train=[1.0, 1.0, 2.0],
@@ -846,7 +847,7 @@ class SynthefyNoriClient:
 
     Run the same prediction locally (no API key, needs ``synthefy[local]``):
 
-    >>> client = SynthefyNoriClient(mode="local")  # doctest: +SKIP
+    >>> client = SynthefyNoriClient(mode="local", model="nori-30m")  # doctest: +SKIP
     """
 
     def __init__(
@@ -858,7 +859,7 @@ class SynthefyNoriClient:
         max_retries: int = 2,
         base_url: str = GATEWAY_BASE_URL,
         endpoint: str = GATEWAY_ENDPOINT,
-        model: Optional[str] = GATEWAY_MODEL,
+        model: Any = _MODEL_REQUIRED,
         auth_scheme: AuthScheme = DEFAULT_AUTH_SCHEME,
         user_agent: Optional[str] = None,
     ) -> None:
@@ -870,6 +871,12 @@ class SynthefyNoriClient:
             raise ValueError(
                 f"auth_scheme must be one of {_VALID_AUTH_SCHEMES}; "
                 f"got {auth_scheme!r}"
+            )
+        if model is _MODEL_REQUIRED:
+            raise ValueError(
+                "model is required: pass model='nori-6m' (~6M) or model='nori-30m' (~29.2M). "
+                "There is no default -- every request names a size. "
+                "(Use model=None only to target a dedicated deployment endpoint.)"
             )
         requested_mode = mode
         if mode == "auto":

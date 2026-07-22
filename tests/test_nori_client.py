@@ -29,7 +29,6 @@ from synthefy.nori_client import (
     DEDICATED_BASE_URL,
     DEDICATED_ENDPOINT,
     GATEWAY_ENDPOINT,
-    GATEWAY_MODEL,
     NORI_VARIANTS,
     _is_thinking_model,
     _resolve_remote_levels,
@@ -67,7 +66,7 @@ def _ok_handler(predictions: List[float], capture: Dict) -> Handler:
 
 def test_predict_returns_predictions_and_sends_expected_request():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([10.0, 20.0], capture))
 
     preds = client.predict(
@@ -78,7 +77,7 @@ def test_predict_returns_predictions_and_sends_expected_request():
 
     assert preds == [10.0, 20.0]
     assert client.mode == "remote"
-    # Gateway is the default: correct path + model field in the body.
+    # Gateway endpoint: correct path + model field in the body.
     assert capture["path"] == GATEWAY_ENDPOINT
     # Gateway requires the Bearer scheme (the default auth_scheme).
     assert capture["headers"]["authorization"] == "Bearer test-key"
@@ -88,13 +87,13 @@ def test_predict_returns_predictions_and_sends_expected_request():
     assert body["y_train"] == [1.0, 1.0, 2.0]
     assert body["X_test"] == [[2.0, 2.0], [3.0, 3.0]]
     assert body["task"] == "regression"
-    # Default selector is the base gateway slug (mapped server-side to the 30M deployment).
-    assert body["model"] == GATEWAY_MODEL
+    # The chosen size resolves to its gateway slug in the body.
+    assert body["model"] == "synthefy/nori-30m"
 
 
 def test_predict_accepts_numpy_arrays():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([42.0], capture))
 
     preds = client.predict(
@@ -116,7 +115,7 @@ def test_predict_accepts_numpy_arrays():
 
 def test_predict_accepts_dataframes_and_series():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([5.0], capture))
 
     X_train = pd.DataFrame({"a": [0.0, 1.0], "b": [1.0, 0.0]})
@@ -134,7 +133,7 @@ def test_predict_accepts_dataframes_and_series():
 
 def test_y_train_single_column_dataframe_is_accepted():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     client.predict(
@@ -147,7 +146,7 @@ def test_y_train_single_column_dataframe_is_accepted():
 
 def test_dataframe_xtest_is_aligned_to_xtrain_by_column_name():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([9.0], capture))
 
     X_train = pd.DataFrame({"a": [0.0, 1.0], "b": [10.0, 11.0]})
@@ -161,7 +160,7 @@ def test_dataframe_xtest_is_aligned_to_xtrain_by_column_name():
 
 
 def test_dataframe_column_set_mismatch_raises():
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     with pytest.raises(ValueError, match="same feature columns"):
         client.predict(
             X_train=pd.DataFrame({"a": [0.0, 1.0], "b": [1.0, 0.0]}),
@@ -177,7 +176,7 @@ def test_dataframe_column_set_mismatch_raises():
 
 def test_non_numeric_columns_are_ordinal_encoded_by_default():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([5.0], capture))
 
     out = client.predict(
@@ -195,7 +194,7 @@ def test_non_numeric_columns_are_ordinal_encoded_by_default():
 
 def test_ordinal_missing_categorical_is_forwarded_as_nan():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     client.predict(
@@ -212,7 +211,7 @@ def test_ordinal_missing_categorical_is_forwarded_as_nan():
 
 def test_ordinal_literal_nan_string_is_a_real_category():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     client.predict(
@@ -229,7 +228,7 @@ def test_ordinal_name_value_collision_is_a_non_issue():
     # Under one-hot, column 'a' value 'b_x' and column 'a_b' value 'x' collide
     # in the '<column>_<value>' namespace; ordinal never generates columns.
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     client.predict(
@@ -242,7 +241,7 @@ def test_ordinal_name_value_collision_is_a_non_issue():
 
 
 def test_invalid_categorical_encoding_raises():
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     df = pd.DataFrame({"cat": ["x", "y"]})
     with pytest.raises(ValueError, match="categorical_encoding"):
         client.predict(
@@ -253,7 +252,7 @@ def test_invalid_categorical_encoding_raises():
 
 def test_non_numeric_columns_are_one_hot_encoded():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([5.0], capture))
 
     out = client.predict(
@@ -272,7 +271,7 @@ def test_non_numeric_columns_are_one_hot_encoded():
 
 def test_one_hot_train_category_absent_in_test_is_kept_as_zero_column():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([9.0], capture))
 
     client.predict(
@@ -288,7 +287,7 @@ def test_one_hot_train_category_absent_in_test_is_kept_as_zero_column():
 
 def test_high_cardinality_column_is_dropped_with_warning():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     with pytest.warns(UserWarning, match="unique values"):
@@ -305,7 +304,7 @@ def test_high_cardinality_column_is_dropped_with_warning():
 
 def test_datetime_column_is_dropped_with_warning():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     with pytest.warns(UserWarning, match="datetime"):
@@ -322,7 +321,7 @@ def test_datetime_column_is_dropped_with_warning():
 
 def test_bool_columns_pass_through_as_numeric():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     # bool is numeric (is_numeric_dtype) -> not one-hot; True/False -> 1.0/0.0
@@ -337,7 +336,7 @@ def test_bool_columns_pass_through_as_numeric():
 
 def test_all_numeric_dataframe_is_not_featurized():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     with warnings.catch_warnings():
@@ -354,7 +353,7 @@ def test_numpy_string_array_raises_pointing_to_dataframe():
     # A 2D numpy/list array is single-dtype, so a string column makes the WHOLE
     # array strings — there are no per-column types to one-hot. We raise and
     # point the caller to DataFrames (where each column keeps its own dtype).
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     with pytest.raises(ValueError, match="one-hot"):
         client.predict(
             X_train=np.array([[1.0, "x"], [2.0, "y"]]),
@@ -366,7 +365,7 @@ def test_numpy_string_array_raises_pointing_to_dataframe():
 def test_column_numeric_in_train_but_not_test_raises_clearly():
     # A column numeric in X_train but object-dtype in X_test is caught with a
     # clear type-mismatch error (not a later cryptic float-cast failure).
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     with pytest.raises(ValueError, match="matching column types"):
         client.predict(
             X_train=pd.DataFrame({"b": [1.0, 2.0]}),
@@ -377,7 +376,7 @@ def test_column_numeric_in_train_but_not_test_raises_clearly():
 
 def test_numeric_category_dtype_is_treated_as_numeric_not_one_hot():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     with warnings.catch_warnings():
@@ -399,7 +398,7 @@ def test_numeric_category_dtype_is_treated_as_numeric_not_one_hot():
 
 def test_all_missing_categorical_column_dropped_with_warning():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     with pytest.warns(UserWarning, match="no non-missing"):
@@ -412,7 +411,7 @@ def test_all_missing_categorical_column_dropped_with_warning():
 
 
 def test_timedelta_column_raises_unsupported():
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     with pytest.raises(ValueError, match="timedelta"):
         client.predict(
             X_train=pd.DataFrame(
@@ -425,7 +424,7 @@ def test_timedelta_column_raises_unsupported():
 
 def test_nan_in_categorical_gets_its_own_indicator_column():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     client.predict(
@@ -447,7 +446,7 @@ def test_integer_category_with_nan_does_not_crash():
     # Regression: demoting an int-category column to numeric must not choke on
     # NaN (it promotes to float and the NaN is forwarded for server imputation).
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     client.predict(
@@ -463,7 +462,7 @@ def test_integer_category_with_nan_does_not_crash():
 
 
 def test_duplicate_column_names_raise():
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     df = pd.DataFrame([[0.0, 1.0, 2.0]], columns=["a", "a", "b"])
     with pytest.raises(ValueError, match="duplicate column name"):
         client.predict(X_train=df, y_train=[1.0], X_test=df)
@@ -471,7 +470,7 @@ def test_duplicate_column_names_raise():
 
 def test_one_hot_name_value_collision_raises_clearly():
     # column 'a' value 'b_x' and column 'a_b' value 'x' both -> dummy 'a_b_x'
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     Xtr = pd.DataFrame({"a": ["b_x", "b_x"], "a_b": ["x", "y"]})
     Xte = pd.DataFrame({"a": ["b_x"], "a_b": ["x"]})
     with pytest.raises(ValueError, match="duplicate column names"):
@@ -480,7 +479,7 @@ def test_one_hot_name_value_collision_raises_clearly():
 
 
 def test_period_column_raises_unsupported():
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     with pytest.raises(ValueError, match="unsupported dtype"):
         client.predict(
             X_train=pd.DataFrame(
@@ -494,7 +493,7 @@ def test_period_column_raises_unsupported():
 
 
 def test_zero_feature_columns_raises():
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     with pytest.raises(ValueError, match="at least one feature column"):
         client.predict(
             X_train=pd.DataFrame(index=[0, 1]),  # 2 rows, 0 columns
@@ -506,7 +505,7 @@ def test_zero_feature_columns_raises():
 def test_categorical_train_with_array_xtest_points_to_dataframe():
     # X_train is a DataFrame with a categorical column but X_test is an array:
     # we can't align/one-hot, so raise a message pointing at passing DataFrames.
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     with pytest.raises(ValueError, match="not a DataFrame"):
         client.predict(
             X_train=pd.DataFrame({"a": [0.0, 1.0], "cat": ["x", "y"]}),
@@ -519,7 +518,7 @@ def test_literal_nan_string_category_is_not_treated_as_missing():
     # A real category whose value is the string "nan" (no actual NaN) must encode
     # cleanly and NOT trip the duplicate-column guard against the dummy_na column.
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     client.predict(
@@ -534,7 +533,7 @@ def test_literal_nan_string_category_is_not_treated_as_missing():
 
 
 def test_nonpositive_cardinality_cap_raises():
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     for cap in (0, -5):
         with pytest.raises(ValueError, match="positive integer"):
             client.predict(
@@ -552,7 +551,7 @@ def test_nonpositive_cardinality_cap_raises():
 
 def test_default_return_is_a_plain_list_not_series():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0, 2.0], capture))
 
     out = client.predict(
@@ -566,7 +565,7 @@ def test_default_return_is_a_plain_list_not_series():
 
 def test_as_pandas_returns_series_named_after_y_train_and_indexed_by_xtest():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([10.0, 20.0], capture))
 
     X_test = pd.DataFrame({"a": [2.0, 3.0]}, index=["w1", "w2"])
@@ -585,7 +584,7 @@ def test_as_pandas_returns_series_named_after_y_train_and_indexed_by_xtest():
 
 def test_as_pandas_uses_single_column_dataframe_y_label():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([7.0], capture))
 
     out = client.predict(
@@ -600,7 +599,7 @@ def test_as_pandas_uses_single_column_dataframe_y_label():
 
 def test_as_pandas_with_non_pandas_inputs_uses_defaults():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([5.0, 6.0], capture))
 
     out = client.predict(
@@ -622,7 +621,7 @@ def test_as_pandas_with_non_pandas_inputs_uses_defaults():
 
 def test_nan_is_forwarded_to_the_server():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     # A missing value in any input must NOT raise; the model imputes it
@@ -667,7 +666,7 @@ def test_dedicated_endpoint_config_omits_model_field():
 
 def test_api_key_from_env(monkeypatch):
     monkeypatch.setenv("BASETEN_API_KEY", "env-key")
-    client = SynthefyNoriClient()
+    client = SynthefyNoriClient(model="nori-30m")
     assert client.api_key == "env-key"
     assert client.mode == "remote"
 
@@ -675,12 +674,12 @@ def test_api_key_from_env(monkeypatch):
 def test_missing_api_key_raises_in_remote_mode(monkeypatch):
     monkeypatch.delenv("BASETEN_API_KEY", raising=False)
     with pytest.raises(ValueError, match="Baseten API key"):
-        SynthefyNoriClient()
+        SynthefyNoriClient(model="nori-30m")
 
 
 def test_local_mode_needs_no_api_key(monkeypatch):
     monkeypatch.delenv("BASETEN_API_KEY", raising=False)
-    client = SynthefyNoriClient(mode="local")
+    client = SynthefyNoriClient(mode="local", model="nori-30m")
     assert client.mode == "local"
     assert client.client is None
 
@@ -691,13 +690,13 @@ def test_invalid_mode_raises():
 
 
 def test_default_auth_scheme_is_bearer():
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     assert client.auth_scheme == "Bearer"
 
 
 def test_auth_scheme_override_sets_authorization_header():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key", auth_scheme="Api-Key")
+    client = SynthefyNoriClient(api_key="test-key", auth_scheme="Api-Key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
     client.predict(X_train=[[1.0]], y_train=[1.0], X_test=[[2.0]])
@@ -715,7 +714,7 @@ def test_auto_mode_falls_back_to_remote_when_package_absent(monkeypatch):
     monkeypatch.setattr(
         "synthefy.nori_client._local_available", lambda: False
     )
-    client = SynthefyNoriClient(api_key="test-key", mode="auto")
+    client = SynthefyNoriClient(api_key="test-key", mode="auto", model="nori-30m")
     assert client.mode == "remote"
 
 
@@ -723,12 +722,12 @@ def test_auto_mode_uses_local_when_package_present(monkeypatch):
     monkeypatch.setattr(
         "synthefy.nori_client._local_available", lambda: True
     )
-    client = SynthefyNoriClient(mode="auto")  # no key needed once local
+    client = SynthefyNoriClient(mode="auto", model="nori-30m")  # no key needed once local
     assert client.mode == "local"
 
 
 def test_context_manager_closes_client():
-    with SynthefyNoriClient(api_key="test-key") as client:
+    with SynthefyNoriClient(api_key="test-key", model="nori-30m") as client:
         assert isinstance(client, SynthefyNoriClient)
     assert client.client.is_closed
 
@@ -742,7 +741,7 @@ def test_context_manager_closes_client():
 def client() -> SynthefyNoriClient:
     # No transport is attached; valid inputs would fail, but these tests assert
     # that validation raises *before* any request is attempted.
-    return SynthefyNoriClient(api_key="test-key")
+    return SynthefyNoriClient(api_key="test-key", model="nori-30m")
 
 
 def test_mismatched_train_rows_raises(client):
@@ -792,7 +791,7 @@ def test_http_400_maps_to_bad_request_error_with_server_message():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, json={"error": "missing field: y_train"})
 
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, handler)
 
     with pytest.raises(BadRequestError) as exc_info:
@@ -806,7 +805,7 @@ def test_http_401_maps_to_authentication_error():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": "invalid api key"})
 
-    client = SynthefyNoriClient(api_key="bad-key")
+    client = SynthefyNoriClient(api_key="bad-key", model="nori-30m")
     _attach_mock(client, handler)
 
     with pytest.raises(AuthenticationError) as exc_info:
@@ -827,7 +826,7 @@ def test_retries_on_server_error_then_succeeds(monkeypatch):
             200, json={"task": "regression", "predictions": [7.0]}
         )
 
-    client = SynthefyNoriClient(api_key="test-key", max_retries=2)
+    client = SynthefyNoriClient(api_key="test-key", max_retries=2, model="nori-30m")
     _attach_mock(client, handler)
 
     preds = client.predict(X_train=[[1.0]], y_train=[1.0], X_test=[[2.0]])
@@ -842,7 +841,7 @@ def test_exhausted_retries_raise_internal_server_error(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"error": "boom"})
 
-    client = SynthefyNoriClient(api_key="test-key", max_retries=1)
+    client = SynthefyNoriClient(api_key="test-key", max_retries=1, model="nori-30m")
     _attach_mock(client, handler)
 
     with pytest.raises(InternalServerError):
@@ -862,7 +861,7 @@ def test_final_error_wins_over_stale_earlier_attempt(monkeypatch):
             raise httpx.ConnectError("transient")
         return httpx.Response(503, json={"error": "down"})
 
-    client = SynthefyNoriClient(api_key="test-key", max_retries=1)
+    client = SynthefyNoriClient(api_key="test-key", max_retries=1, model="nori-30m")
     _attach_mock(client, handler)
 
     with pytest.raises(InternalServerError):
@@ -909,7 +908,7 @@ def test_local_predict_raises_helpful_error_without_package(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    client = SynthefyNoriClient(mode="local")
+    client = SynthefyNoriClient(mode="local", model="nori-30m")
     with pytest.raises(ImportError, match=r"synthefy\[local\]"):
         client.predict(
             X_train=[[1.0, 2.0]], y_train=[3.0], X_test=[[4.0, 5.0]]
@@ -919,7 +918,7 @@ def test_local_predict_raises_helpful_error_without_package(monkeypatch):
 def test_local_predict_validates_shapes_before_import():
     # Shape validation happens before the optional dependency is imported, so
     # this raises ValueError regardless of whether synthefy-nori is present.
-    client = SynthefyNoriClient(mode="local")
+    client = SynthefyNoriClient(mode="local", model="nori-30m")
     with pytest.raises(ValueError, match="they must match"):
         client.predict(X_train=[[1.0], [2.0]], y_train=[1.0], X_test=[[3.0]])
 
@@ -928,7 +927,7 @@ def test_local_predict_validates_shapes_before_import():
 def test_local_predict_real_inference():
     pytest.importorskip("synthefy_nori")
 
-    client = SynthefyNoriClient(mode="local")
+    client = SynthefyNoriClient(mode="local", model="nori-30m")
     rng = np.random.default_rng(0)
     X_train = rng.normal(size=(20, 3))
     y_train = X_train[:, 0] * 2.0 + 1.0
@@ -955,14 +954,13 @@ def test_model_variant_resolves_gateway_and_local():
     assert c30.model == "synthefy/nori-30m"
     assert c30._local_variant == "nori-30m"
 
-    # "nori" is the default: its synthefy/nori gateway slug is mapped to the 30M deployment
-    cdef = SynthefyNoriClient(api_key="k", model="nori")
-    assert cdef.model == "synthefy/nori" and cdef._local_variant == "nori-30m"
-
-    # "nori-6m" is the pinned ~6M base: its own gateway slug + explicit local variant, so local
-    # mode loads the base even though the package default is now 30M
+    # "nori-6m" is the ~6M base: its own gateway slug + explicit local variant
     c6 = SynthefyNoriClient(api_key="k", model="nori-6m")
     assert c6.model == "synthefy/nori-6m" and c6._local_variant == "nori-6m"
+
+    # a bare "nori" is not a valid selector -- it names no size, so it is NOT in the registry
+    # (it passes through as a raw gateway model, it does not resolve to a size)
+    assert "nori" not in NORI_VARIANTS
 
     # a raw gateway slug passes through unchanged
     craw = SynthefyNoriClient(api_key="k", model="synthefy/custom")
@@ -973,12 +971,21 @@ def test_model_variant_resolves_gateway_and_local():
     assert cnone.model is None and cnone._local_variant is None
 
 
-def test_default_model_maps_to_30m():
-    # Default selector is the base gateway slug, which is mapped to the 30M deployment
-    # (remote) and resolves to the 30M checkpoint (local).
-    c = SynthefyNoriClient(api_key="k")
-    assert c.model == GATEWAY_MODEL           # "synthefy/nori"
+def test_model_is_required_no_default():
+    # There is no default model -- omitting model= raises (every request names a size).
+    with pytest.raises(ValueError, match="model is required"):
+        SynthefyNoriClient(api_key="k")
+    # An explicit size resolves to its size-suffixed gateway slug + local checkpoint.
+    c = SynthefyNoriClient(api_key="k", model="nori-30m")
+    assert c.model == "synthefy/nori-30m"
     assert c._local_variant == "nori-30m"
+
+
+def test_no_bare_nori_slug():
+    # The ambiguous bare selectors are gone -- only size-explicit names/slugs resolve.
+    assert "nori" not in NORI_VARIANTS
+    assert "synthefy/nori" not in NORI_VARIANTS
+    assert set(NORI_VARIANTS) >= {"nori-6m", "nori-30m", "synthefy/nori-6m", "synthefy/nori-30m"}
 
 
 def test_remote_body_uses_variant_gateway_slug():
@@ -1027,12 +1034,10 @@ def test_local_variant_needs_model_selector_on_old_synthefy_nori(monkeypatch):
 
 
 def test_gateway_slug_resolves_to_local_variant():
-    # Gateway slugs map to the right local checkpoint, not a raw-repo lookup, so slug users get
-    # the intended weights locally. synthefy/nori is mapped to 30M; synthefy/nori-6m is the base.
+    # Size-explicit gateway slugs map to the right local checkpoint, not a raw-repo lookup, so slug
+    # users get the intended weights locally. There is no bare synthefy/nori.
     cbase = SynthefyNoriClient(api_key="k", model="synthefy/nori-6m")
     assert cbase.model == "synthefy/nori-6m" and cbase._local_variant == "nori-6m"
-    cdef = SynthefyNoriClient(api_key="k", model="synthefy/nori")
-    assert cdef.model == "synthefy/nori" and cdef._local_variant == "nori-30m"
     c30 = SynthefyNoriClient(api_key="k", model="synthefy/nori-30m")
     assert c30.model == "synthefy/nori-30m" and c30._local_variant == "nori-30m"
 
@@ -1111,7 +1116,7 @@ def test_unknown_model_still_passes_through_in_remote_mode():
 
 def test_remote_snap_mean_snaps_to_y_train_levels():
     # y_train levels {1, 2}; returned means snap to the nearest level.
-    client = SynthefyNoriClient(api_key="k")
+    client = SynthefyNoriClient(api_key="k", model="nori-30m")
     _attach_mock(client, _ok_handler([0.9, 1.6, 2.4], {}))
     preds = client.predict(
         X_train=[[0.0], [1.0], [2.0]],
@@ -1124,7 +1129,7 @@ def test_remote_snap_mean_snaps_to_y_train_levels():
 
 def test_remote_snap_mean_uses_explicit_categorical_levels():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="k")
+    client = SynthefyNoriClient(api_key="k", model="nori-30m")
     _attach_mock(client, _ok_handler([0.9, 4.2], capture))
     preds = client.predict(
         X_train=[[0.0], [1.0], [2.0]],
@@ -1139,7 +1144,7 @@ def test_remote_snap_mean_uses_explicit_categorical_levels():
 
 
 def test_remote_snap_mean_as_pandas_stays_on_lattice():
-    client = SynthefyNoriClient(api_key="k")
+    client = SynthefyNoriClient(api_key="k", model="nori-30m")
     _attach_mock(client, _ok_handler([0.9, 1.6], {}))
     X_test = pd.DataFrame({"a": [0.5, 1.5]}, index=[10, 20])
     preds = client.predict(
@@ -1158,7 +1163,7 @@ def test_remote_snap_mean_as_pandas_stays_on_lattice():
 def test_remote_bank_strategy_raises_with_guidance():
     # Validation runs before the request: no paid round-trip on a bad strategy.
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="k")
+    client = SynthefyNoriClient(api_key="k", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
     with pytest.raises(ValueError, match="snap-mean"):
         client.predict(
@@ -1169,7 +1174,7 @@ def test_remote_bank_strategy_raises_with_guidance():
 
 def test_remote_levels_without_strategy_raises_with_guidance():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="k")
+    client = SynthefyNoriClient(api_key="k", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
     with pytest.raises(ValueError, match='discretize="snap-mean"'):
         client.predict(
@@ -1253,7 +1258,7 @@ def test_local_discretize_needs_newer_synthefy_nori(monkeypatch):
         "synthefy.nori_client._load_local_predict", lambda: (lambda *a, **k: [1.0])
     )
     monkeypatch.setattr("synthefy.nori_client._local_discretize_available", lambda: False)
-    client = SynthefyNoriClient(mode="local")
+    client = SynthefyNoriClient(mode="local", model="nori-30m")
     with pytest.raises(ImportError, match=r"synthefy\[local\]"):
         client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE, discretize="map-cell")
 
@@ -1262,7 +1267,7 @@ def test_local_discretize_needs_newer_synthefy_nori(monkeypatch):
 def test_local_discretize_real_inference():
     pytest.importorskip("synthefy_nori.discretize")
 
-    client = SynthefyNoriClient(mode="local")
+    client = SynthefyNoriClient(mode="local", model="nori-30m")
     rng = np.random.default_rng(0)
     X_train = rng.normal(size=(30, 3))
     y_train = np.clip(np.round(X_train[:, 0] * 2.0 + 3.0), 1, 5)
@@ -1289,7 +1294,7 @@ def _fake_embed(texts):
 
 def test_text_columns_embeds_client_side_and_sends_numeric():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0, 2.0], capture))
 
     df_train = pd.DataFrame({
@@ -1312,7 +1317,7 @@ def test_text_columns_embeds_client_side_and_sends_numeric():
 
 
 def test_text_columns_requires_dataframe():
-    client = SynthefyNoriClient(api_key="test-key")
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], {}))
     with pytest.raises(ValueError):
         client.predict([[1.0, 2.0]], [1.0], [[1.0, 2.0]], text_columns=["review"])
