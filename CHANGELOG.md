@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.8.0]
+
+### Changed
+
+- **Default Nori model is now `nori-30m`** (the ~29.2M variant), was the ~6M base
+  (`synthefy/nori`). `SynthefyNoriClient()` with no `model=` now runs the 30M model in
+  both remote and local mode — the single `DEFAULT_MODEL` constant resolves through the
+  existing `NORI_VARIANTS` registry, so one selector drives the gateway slug and the local
+  checkpoint alike. Pass `model="nori-6m"` (or `"nori"`) to keep the previous base model.
+
 ## [4.3.0]
 
 ### Changed

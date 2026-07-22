@@ -45,8 +45,8 @@ GATEWAY_MODEL = "synthefy/nori"
 
 # Nori model selector -> (remote gateway model slug, local variant name passed to the
 # synthefy-nori ``model=`` selector; ``None`` = the default base ~6M checkpoint). The friendly
-# names "nori"/"nori-6m" are the ~6M base (the default) and "nori-30m" is the ~29.2M variant; the
-# raw gateway slugs are listed too so the default ``model="synthefy/nori"`` and an explicit
+# names "nori"/"nori-6m" are the ~6M base and "nori-30m" is the ~29.2M variant (the default; see
+# DEFAULT_MODEL below). The raw gateway slugs are listed too so both ``model="synthefy/nori"`` and
 # "synthefy/nori-30m" load the right checkpoint locally instead of being treated as a raw HF repo.
 # The "nori-30m-thinking*" entries are the test-time-compute (Thinking) variants: hosted-API only,
 # so they map a remote gateway slug but have NO local variant -- the thinking guard in __init__
@@ -65,6 +65,11 @@ NORI_VARIANTS = {
     "nori-30m-thinking": ("synthefy/nori-30m-thinking-medium", None),
     "nori-30m-thinking-medium": ("synthefy/nori-30m-thinking-medium", None),
 }
+
+# Default model when the caller does not pass ``model=`` -- the 30M variant (issue #115). A
+# friendly name so this single NORI_VARIANTS entry drives BOTH the remote gateway slug and the
+# local checkpoint; re-defaulting later is a one-line change here.
+DEFAULT_MODEL = "nori-30m"
 
 
 def _is_thinking_model(model: Optional[str]) -> bool:
@@ -798,9 +803,9 @@ class SynthefyNoriClient:
         Base URL of the inference host (remote mode).
     endpoint : str, default GATEWAY_ENDPOINT
         Path appended to ``base_url`` for predictions (remote mode).
-    model : str or None, default GATEWAY_MODEL
-        Which Nori to run. Accepts a friendly size selector — ``"nori"`` / ``"nori-6m"``
-        (the ~6M base, the default) or ``"nori-30m"`` (the ~29.2M variant) — which selects
+    model : str or None, default ``"nori-30m"``
+        Which Nori to run. Accepts a friendly size selector — ``"nori-30m"`` (the ~29.2M
+        variant, the default) or ``"nori"`` / ``"nori-6m"`` (the ~6M base) — which selects
         both the remote gateway deployment and, in local mode, the checkpoint. A raw gateway
         slug (e.g. ``"synthefy/nori"``) is also accepted verbatim, and ``None`` targets a
         dedicated deployment (no ``model`` field in the body). Selecting a non-base variant in
@@ -851,7 +856,7 @@ class SynthefyNoriClient:
         max_retries: int = 2,
         base_url: str = GATEWAY_BASE_URL,
         endpoint: str = GATEWAY_ENDPOINT,
-        model: Optional[str] = GATEWAY_MODEL,
+        model: Optional[str] = DEFAULT_MODEL,
         auth_scheme: AuthScheme = DEFAULT_AUTH_SCHEME,
         user_agent: Optional[str] = None,
     ) -> None:
