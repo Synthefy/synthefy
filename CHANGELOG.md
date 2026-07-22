@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`nori` / `synthefy/nori` now mean 30M.** `"nori"` / `"nori-30m"` / `"synthefy/nori"` /
   `"synthefy/nori-30m"` all run 30M.
 - **Pass `model="nori-6m"` for the ~6M base** — served by its own `synthefy/nori-6m` gateway
-  slug (`"nori-6m"` / `"synthefy/nori-6m"`).
+  slug (`"nori-6m"` / `"synthefy/nori-6m"`). In local mode it forwards the `nori-6m` variant
+  explicitly, so it stays the ~6M base even though `synthefy-nori`'s own default is now 30M.
 
 ## [4.3.0]
 

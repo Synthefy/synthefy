@@ -959,9 +959,10 @@ def test_model_variant_resolves_gateway_and_local():
     cdef = SynthefyNoriClient(api_key="k", model="nori")
     assert cdef.model == "synthefy/nori" and cdef._local_variant == "nori-30m"
 
-    # "nori-6m" is the pinned ~6M base: its own gateway slug, no local variant override
+    # "nori-6m" is the pinned ~6M base: its own gateway slug + explicit local variant, so local
+    # mode loads the base even though the package default is now 30M
     c6 = SynthefyNoriClient(api_key="k", model="nori-6m")
-    assert c6.model == "synthefy/nori-6m" and c6._local_variant is None
+    assert c6.model == "synthefy/nori-6m" and c6._local_variant == "nori-6m"
 
     # a raw gateway slug passes through unchanged
     craw = SynthefyNoriClient(api_key="k", model="synthefy/custom")
@@ -1001,7 +1002,7 @@ def test_local_mode_passes_variant_to_predict(monkeypatch):
     assert seen["model"] == "nori-30m"
 
 
-def test_local_mode_base_does_not_force_a_variant(monkeypatch):
+def test_local_mode_nori_6m_forces_base_variant(monkeypatch):
     seen: Dict = {}
 
     def fake_predict(X_train, y_train, X_test, *, task=None, model="__unset__"):
@@ -1011,7 +1012,8 @@ def test_local_mode_base_does_not_force_a_variant(monkeypatch):
     monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
     client = SynthefyNoriClient(mode="local", model="nori-6m")  # base 6M
     client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
-    assert seen["model"] == "__unset__"  # model= not passed → predict() uses its own default
+    # nori-6m forwards its variant explicitly so local loads the base, not the package's 30M default
+    assert seen["model"] == "nori-6m"
 
 
 def test_local_variant_needs_model_selector_on_old_synthefy_nori(monkeypatch):
@@ -1028,7 +1030,7 @@ def test_gateway_slug_resolves_to_local_variant():
     # Gateway slugs map to the right local checkpoint, not a raw-repo lookup, so slug users get
     # the intended weights locally. synthefy/nori is mapped to 30M; synthefy/nori-6m is the base.
     cbase = SynthefyNoriClient(api_key="k", model="synthefy/nori-6m")
-    assert cbase.model == "synthefy/nori-6m" and cbase._local_variant is None
+    assert cbase.model == "synthefy/nori-6m" and cbase._local_variant == "nori-6m"
     cdef = SynthefyNoriClient(api_key="k", model="synthefy/nori")
     assert cdef.model == "synthefy/nori" and cdef._local_variant == "nori-30m"
     c30 = SynthefyNoriClient(api_key="k", model="synthefy/nori-30m")
@@ -1208,9 +1210,9 @@ def test_local_mode_passes_discretize_and_levels(monkeypatch):
 
     monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
     monkeypatch.setattr("synthefy.nori_client._local_discretize_available", lambda: True)
-    # Base model: keeps this focused on discretize forwarding, independent of the 30M
-    # default's model= selector requirement (covered by its own test).
-    client = SynthefyNoriClient(mode="local", model="nori-6m")
+    # model=None forwards no variant selector, isolating this to discretize forwarding
+    # (variant selection is covered by its own test).
+    client = SynthefyNoriClient(mode="local", model=None)
     client.predict(
         X_train=_XTR,
         y_train=_YTR,
@@ -1231,7 +1233,7 @@ def test_local_mode_levels_alone_activate_package_default(monkeypatch):
 
     monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
     monkeypatch.setattr("synthefy.nori_client._local_discretize_available", lambda: True)
-    client = SynthefyNoriClient(mode="local", model="nori-6m")  # base: see note above
+    client = SynthefyNoriClient(mode="local", model=None)  # no variant selector (see note above)
     client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE, categorical_levels=[1, 2])
     assert "discretize" not in seen  # package picks its own default (map-cell)
     assert seen["categorical_levels"] == [1, 2]
@@ -1242,7 +1244,7 @@ def test_local_mode_without_discretize_sends_no_extra_kwargs(monkeypatch):
         return [1.0]
 
     monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: strict_predict)
-    client = SynthefyNoriClient(mode="local", model="nori-6m")  # base: bare predict signature works
+    client = SynthefyNoriClient(mode="local", model=None)  # no variant selector; bare predict signature works
     assert client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE) == [1.0]
 
 
