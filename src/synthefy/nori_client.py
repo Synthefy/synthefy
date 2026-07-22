@@ -780,8 +780,8 @@ class SynthefyNoriClient:
       fall back to ``"remote"`` (which then requires an API key).
 
     For remote mode, the client targets the Baseten inference *gateway* by default
-    (``https://inference.baseten.co/predict``) and includes
-    ``"model": "synthefy/nori"`` in the request body. The gateway authenticates
+    (``https://inference.baseten.co/predict``) and includes the chosen size slug (e.g.
+    ``"model": "synthefy/nori-30m"``) in the request body. The gateway authenticates
     with the ``Bearer`` scheme (the default ``auth_scheme``). To target a
     dedicated deployment instead, pass ``base_url=DEDICATED_BASE_URL``,
     ``endpoint=DEDICATED_ENDPOINT``, ``model=None`` and ``auth_scheme="Api-Key"``
