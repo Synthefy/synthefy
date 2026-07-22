@@ -101,9 +101,10 @@ def _resolve_variant(model: Optional[str]) -> tuple:
 def _resolve_local_variant(model: Optional[str]) -> Optional[str]:
     """Resolve the synthefy-nori ``model=`` value for local inference, or raise if impossible.
 
-    ``"nori-6m"``/``"synthefy/nori-6m"`` run the ~6M base checkpoint; ``"nori"``/``"nori-30m"``
-    (the default) -- and ``None``, which forwards nothing so synthefy-nori uses its own default --
-    run the 29.2M checkpoint. Any other selector has no local checkpoint, so this
+    ``"nori-6m"``/``"synthefy/nori-6m"`` run the ~6M base checkpoint; ``"nori-30m"``/
+    ``"synthefy/nori-30m"`` run the 29.2M checkpoint. ``None`` forwards no ``model=`` (so
+    synthefy-nori, which itself requires an explicit model, would raise). Any other selector has
+    no local checkpoint, so this
     raises :class:`ValueError` instead of silently falling back to the base model -- a Nori
     Thinking variant gets a message pointing at the hosted API, everything else a message listing
     the locally runnable options.
