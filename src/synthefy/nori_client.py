@@ -43,12 +43,15 @@ GATEWAY_BASE_URL = "https://inference.baseten.co"
 GATEWAY_ENDPOINT = "/predict"
 GATEWAY_MODEL = "synthefy/nori"
 
-# Nori model selector -> (remote gateway model slug, local variant name passed to the
-# synthefy-nori ``model=`` selector; ``None`` = the base ~6M checkpoint). "nori" is the default
-# (~29.2M): its ``synthefy/nori`` gateway slug is mapped to the 30M deployment, so "nori" and
-# "nori-30m" both serve 30M. "nori-6m" / ``synthefy/nori-6m`` is the pinned ~6M base (its own
-# gateway slug + the base local checkpoint). The raw gateway slugs are listed too so they load
-# the right checkpoint locally instead of being treated as a raw HF repo.
+# Model registry. Maps a ``model=`` selector -> ``(remote_gateway_slug, local_variant)``:
+#   key                 = what the caller passes as ``model=`` (a friendly name or a raw gateway slug)
+#   remote_gateway_slug = the "model" string sent in the gateway request body (remote mode)
+#   local_variant       = the name forwarded to synthefy-nori's ``model=`` selector (local mode);
+#                         ``None`` = no override, i.e. the package's base ~6M checkpoint
+# "nori" is the default (~29.2M): its ``synthefy/nori`` gateway slug is mapped to the 30M deployment,
+# so "nori" and "nori-30m" both serve 30M. "nori-6m" / ``synthefy/nori-6m`` is the pinned ~6M base.
+# The raw gateway slugs are listed too so they load the right checkpoint locally instead of being
+# treated as a raw HF repo.
 # The "nori-30m-thinking*" entries are the test-time-compute (Thinking) variants: hosted-API only,
 # so they map a remote gateway slug but have NO local variant -- the thinking guard in __init__
 # refuses them in mode="local"/"auto" (their ``local_variant`` below is therefore never consulted).
