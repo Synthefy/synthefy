@@ -117,14 +117,14 @@ def _resolve_local_variant(model: Optional[str]) -> Optional[str]:
         raise ValueError(
             f"model={model!r} is a Nori Thinking (test-time-compute) variant, which runs only "
             "on the hosted Synthefy API and has no local checkpoint. Use mode='remote' with a "
-            "Baseten API key to run Thinking, or select 'nori'/'nori-6m'/'nori-30m' for local "
+            "Baseten API key to run Thinking, or select 'nori-6m'/'nori-30m' for local "
             "inference."
         )
     if model is None or model in NORI_VARIANTS:
         return _resolve_variant(model)[1]
     raise ValueError(
         f"model={model!r} has no local checkpoint and cannot run in mode='local'. Local "
-        "inference supports the base model ('nori'/'nori-6m') and 'nori-30m'. For hosted-only "
+        "inference supports the base model ('nori-6m') and 'nori-30m'. For hosted-only "
         "variants (e.g. Nori Thinking) or a custom deployment slug, use mode='remote' with a "
         "Baseten API key."
     )
