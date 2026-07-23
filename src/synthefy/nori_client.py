@@ -72,6 +72,10 @@ NORI_VARIANTS = {
     "nori-30m-thinking-medium": ("synthefy/nori-30m-thinking-medium", None),
 }
 
+# Selectable model names for error messages, derived from NORI_VARIANTS so they stay current as
+# variants are added. Friendly names only (the "synthefy/..." raw slugs are aliases, not listed).
+_MODEL_NAMES = tuple(name for name in NORI_VARIANTS if "/" not in name)
+
 
 def _is_thinking_model(model: Optional[str]) -> bool:
     """Return ``True`` if ``model`` names a Nori Thinking (test-time-compute) variant.
@@ -875,9 +879,9 @@ class SynthefyNoriClient:
             )
         if model is _MODEL_REQUIRED:
             raise ValueError(
-                "model is required: pass model='nori-6m' (~6M) or model='nori-30m' (~29.2M). "
-                "There is no default -- every request names a size. "
-                "(Use model=None only to target a dedicated deployment endpoint.)"
+                "model is required -- there is no default; every request names a size. "
+                f"Choose one of: {', '.join(_MODEL_NAMES)} (a raw gateway slug is also accepted; "
+                "use model=None only to target a dedicated deployment endpoint)."
             )
         requested_mode = mode
         if mode == "auto":
