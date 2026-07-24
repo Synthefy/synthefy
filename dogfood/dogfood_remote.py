@@ -56,7 +56,7 @@ def main():
 
     X_train, y_train, X_test, expected = make_dataset()
 
-    client = SynthefyNoriClient()  # gateway default (model=synthefy/nori)
+    client = SynthefyNoriClient(model="nori-6m")  # ~6M base (same weights as the old default)
     print("url:", client.base_url + client.endpoint, "| mode:", client.mode)
     preds = client.predict(X_train, y_train, X_test)
 

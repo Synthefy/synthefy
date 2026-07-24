@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0]
+
+### Changed (breaking)
+
+- **`model=` is now REQUIRED** on `SynthefyNoriClient` — there is no default. Every request
+  names a size: `model="nori-6m"` (~6M base) or `model="nori-30m"` (~29.2M). Omitting `model`
+  raises `ValueError`. (`model=None` still targets a dedicated deployment endpoint.) This keeps a
+  model identifier from ever silently changing which model it serves.
+- **Removed the bare `nori` / `synthefy/nori` selectors.** Only size-explicit names/slugs resolve:
+  `"nori-6m"` / `"synthefy/nori-6m"` and `"nori-30m"` / `"synthefy/nori-30m"` (plus the hosted-only
+  `nori-30m-thinking*`). The `GATEWAY_MODEL` constant is removed.
+
+### Migration
+
+- Add an explicit size: `SynthefyNoriClient(api_key=..., model="nori-30m")` (was the ~6M default;
+  pass `model="nori-6m"` to keep the smaller base).
+
 ## [4.3.0]
 
 ### Changed

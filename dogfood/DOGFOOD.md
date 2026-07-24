@@ -59,7 +59,7 @@ python dogfood/dogfood_remote.py
 ```
 
 This hits the **gateway** (`https://inference.baseten.co/predict`), which routes by
-the `synthefy/nori` model slug in the request body. The gateway is the only remote
+the size-explicit model slug in the request body (this kit uses `synthefy/nori-6m`). The gateway is the only remote
 path a Frontier/gateway key can reach — dedicated deployment URLs reject these keys
 with a 403 by design, so the kit no longer targets them.
 
@@ -77,7 +77,7 @@ REMOTE OK
 - `AuthenticationError` (401) / `PermissionDeniedError` (403) → bad/missing `BASETEN_API_KEY`.
 - `BadRequestError` (400) → carries the server's error string.
 - `InternalServerError` (5xx) → server-side; the client already retried with backoff.
-- Hangs / read timeout → the hosted `synthefy/nori` deployment is asleep or unhealthy; confirm a `curl` to the gateway returns 200.
+- Hangs / read timeout → the hosted `synthefy/nori-6m` deployment is asleep or unhealthy; confirm a `curl` to the gateway returns 200.
 
 ---
 

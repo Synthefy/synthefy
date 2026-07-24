@@ -41,23 +41,29 @@ from synthefy.api_client import (
 # Gateway endpoint (default): routes to the model by name, body carries "model".
 GATEWAY_BASE_URL = "https://inference.baseten.co"
 GATEWAY_ENDPOINT = "/predict"
-GATEWAY_MODEL = "synthefy/nori"
 
-# Nori model selector -> (remote gateway model slug, local variant name passed to the
-# synthefy-nori ``model=`` selector; ``None`` = the default base ~6M checkpoint). The friendly
-# names "nori"/"nori-6m" are the ~6M base (the default) and "nori-30m" is the ~29.2M variant; the
-# raw gateway slugs are listed too so the default ``model="synthefy/nori"`` and an explicit
-# "synthefy/nori-30m" load the right checkpoint locally instead of being treated as a raw HF repo.
+# Sentinel for a required ``model=`` (there is no default -- every caller names a size). Kept
+# distinct from ``None``, which is a valid, meaningful value: a dedicated deployment endpoint that
+# omits "model" from the request body.
+_MODEL_REQUIRED: Any = object()
+
+# Model registry. Maps a ``model=`` selector -> ``(remote_gateway_slug, local_variant)``:
+#   key                 = what the caller passes as ``model=`` (a friendly name or a raw gateway slug)
+#   remote_gateway_slug = the "model" string sent in the gateway request body (remote mode)
+#   local_variant       = the name forwarded to synthefy-nori's ``model=`` selector (local mode)
+# Every selector names its size -- there is no bare "nori"/"synthefy/nori", so a slug never silently
+# changes which model it serves (``model=`` is required; see the constructor). "nori-6m" is the ~6M
+# base; "nori-30m" is the ~29.2M variant. The raw gateway slugs are listed too so they load the
+# right checkpoint locally instead of being treated as a raw HF repo.
 # The "nori-30m-thinking*" entries are the test-time-compute (Thinking) variants: hosted-API only,
 # so they map a remote gateway slug but have NO local variant -- the thinking guard in __init__
 # refuses them in mode="local"/"auto" (their ``local_variant`` below is therefore never consulted).
 # A friendly name/slug absent here that reaches local mode has no local checkpoint and is refused
-# rather than silently running the base model (see ``_resolve_local_variant``).
+# rather than silently running a different model (see ``_resolve_local_variant``).
 NORI_VARIANTS = {
-    "nori": ("synthefy/nori", None),
-    "nori-6m": ("synthefy/nori", None),
+    "nori-6m": ("synthefy/nori-6m", "nori-6m"),
     "nori-30m": ("synthefy/nori-30m", "nori-30m"),
-    "synthefy/nori": ("synthefy/nori", None),
+    "synthefy/nori-6m": ("synthefy/nori-6m", "nori-6m"),
     "synthefy/nori-30m": ("synthefy/nori-30m", "nori-30m"),
     # Thinking (test-time compute) -- hosted-API only; local/auto is refused by the thinking guard.
     # Only the medium budget is deployed today, so the bare name and "-medium" both route to it;
@@ -65,6 +71,10 @@ NORI_VARIANTS = {
     "nori-30m-thinking": ("synthefy/nori-30m-thinking-medium", None),
     "nori-30m-thinking-medium": ("synthefy/nori-30m-thinking-medium", None),
 }
+
+# Selectable model names for error messages, derived from NORI_VARIANTS so they stay current as
+# variants are added. Friendly names only (the "synthefy/..." raw slugs are aliases, not listed).
+_MODEL_NAMES = tuple(name for name in NORI_VARIANTS if "/" not in name)
 
 
 def _is_thinking_model(model: Optional[str]) -> bool:
@@ -95,8 +105,10 @@ def _resolve_variant(model: Optional[str]) -> tuple:
 def _resolve_local_variant(model: Optional[str]) -> Optional[str]:
     """Resolve the synthefy-nori ``model=`` value for local inference, or raise if impossible.
 
-    ``None``/``"nori"``/``"nori-6m"`` (and the base gateway slug) run the default ~6M checkpoint;
-    ``"nori-30m"`` runs the 29.2M checkpoint. Any other selector has no local checkpoint, so this
+    ``"nori-6m"``/``"synthefy/nori-6m"`` run the ~6M base checkpoint; ``"nori-30m"``/
+    ``"synthefy/nori-30m"`` run the 29.2M checkpoint. ``None`` forwards no ``model=`` (so
+    synthefy-nori, which itself requires an explicit model, would raise). Any other selector has
+    no local checkpoint, so this
     raises :class:`ValueError` instead of silently falling back to the base model -- a Nori
     Thinking variant gets a message pointing at the hosted API, everything else a message listing
     the locally runnable options.
@@ -105,14 +117,14 @@ def _resolve_local_variant(model: Optional[str]) -> Optional[str]:
         raise ValueError(
             f"model={model!r} is a Nori Thinking (test-time-compute) variant, which runs only "
             "on the hosted Synthefy API and has no local checkpoint. Use mode='remote' with a "
-            "Baseten API key to run Thinking, or select 'nori'/'nori-6m'/'nori-30m' for local "
+            "Baseten API key to run Thinking, or select 'nori-6m'/'nori-30m' for local "
             "inference."
         )
     if model is None or model in NORI_VARIANTS:
         return _resolve_variant(model)[1]
     raise ValueError(
         f"model={model!r} has no local checkpoint and cannot run in mode='local'. Local "
-        "inference supports the base model ('nori'/'nori-6m') and 'nori-30m'. For hosted-only "
+        "inference supports the base model ('nori-6m') and 'nori-30m'. For hosted-only "
         "variants (e.g. Nori Thinking) or a custom deployment slug, use mode='remote' with a "
         "Baseten API key."
     )
@@ -773,8 +785,8 @@ class SynthefyNoriClient:
       fall back to ``"remote"`` (which then requires an API key).
 
     For remote mode, the client targets the Baseten inference *gateway* by default
-    (``https://inference.baseten.co/predict``) and includes
-    ``"model": "synthefy/nori"`` in the request body. The gateway authenticates
+    (``https://inference.baseten.co/predict``) and includes the chosen size slug (e.g.
+    ``"model": "synthefy/nori-30m"``) in the request body. The gateway authenticates
     with the ``Bearer`` scheme (the default ``auth_scheme``). To target a
     dedicated deployment instead, pass ``base_url=DEDICATED_BASE_URL``,
     ``endpoint=DEDICATED_ENDPOINT``, ``model=None`` and ``auth_scheme="Api-Key"``
@@ -798,13 +810,14 @@ class SynthefyNoriClient:
         Base URL of the inference host (remote mode).
     endpoint : str, default GATEWAY_ENDPOINT
         Path appended to ``base_url`` for predictions (remote mode).
-    model : str or None, default GATEWAY_MODEL
-        Which Nori to run. Accepts a friendly size selector — ``"nori"`` / ``"nori-6m"``
-        (the ~6M base, the default) or ``"nori-30m"`` (the ~29.2M variant) — which selects
-        both the remote gateway deployment and, in local mode, the checkpoint. A raw gateway
-        slug (e.g. ``"synthefy/nori"``) is also accepted verbatim, and ``None`` targets a
-        dedicated deployment (no ``model`` field in the body). Selecting a non-base variant in
-        local mode requires a synthefy-nori build with the ``model=`` selector.
+    model : str or None, REQUIRED
+        Which Nori to run — there is no default; every request names a size. Pass a friendly
+        size selector — ``"nori-6m"`` (the ~6M base) or ``"nori-30m"`` (the ~29.2M variant) —
+        which selects both the remote gateway deployment and, in local mode, the checkpoint. A
+        raw gateway slug (e.g. ``"synthefy/nori-30m"``) is also accepted verbatim, and ``None``
+        targets a dedicated deployment (no ``model`` field in the body). Omitting ``model``
+        entirely raises :class:`ValueError`. Selecting a variant in local mode requires a
+        synthefy-nori build with the ``model=`` selector.
         Nori Thinking — the friendly names ``"nori-30m-thinking"`` / ``"nori-30m-thinking-medium"``
         (only the medium budget is deployed today; both route to it), or the
         ``"synthefy/nori-30m-thinking-medium"`` gateway slug — runs only on the hosted API:
@@ -828,7 +841,7 @@ class SynthefyNoriClient:
     Examples
     --------
     >>> from synthefy import SynthefyNoriClient
-    >>> client = SynthefyNoriClient(api_key="...")  # or BASETEN_API_KEY
+    >>> client = SynthefyNoriClient(api_key="...", model="nori-30m")  # or BASETEN_API_KEY
     >>> preds = client.predict(
     ...     X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
     ...     y_train=[1.0, 1.0, 2.0],
@@ -839,7 +852,7 @@ class SynthefyNoriClient:
 
     Run the same prediction locally (no API key, needs ``synthefy[local]``):
 
-    >>> client = SynthefyNoriClient(mode="local")  # doctest: +SKIP
+    >>> client = SynthefyNoriClient(mode="local", model="nori-30m")  # doctest: +SKIP
     """
 
     def __init__(
@@ -851,7 +864,7 @@ class SynthefyNoriClient:
         max_retries: int = 2,
         base_url: str = GATEWAY_BASE_URL,
         endpoint: str = GATEWAY_ENDPOINT,
-        model: Optional[str] = GATEWAY_MODEL,
+        model: Any = _MODEL_REQUIRED,
         auth_scheme: AuthScheme = DEFAULT_AUTH_SCHEME,
         user_agent: Optional[str] = None,
     ) -> None:
@@ -863,6 +876,12 @@ class SynthefyNoriClient:
             raise ValueError(
                 f"auth_scheme must be one of {_VALID_AUTH_SCHEMES}; "
                 f"got {auth_scheme!r}"
+            )
+        if model is _MODEL_REQUIRED:
+            raise ValueError(
+                "model is required -- there is no default; every request names a size. "
+                f"Choose one of: {', '.join(_MODEL_NAMES)} (a raw gateway slug is also accepted; "
+                "use model=None only to target a dedicated deployment endpoint)."
             )
         requested_mode = mode
         if mode == "auto":
