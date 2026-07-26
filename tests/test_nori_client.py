@@ -869,6 +869,84 @@ def test_final_error_wins_over_stale_earlier_attempt(monkeypatch):
     assert calls["n"] == 2
 
 
+def test_read_timeout_not_retried_and_enriched(monkeypatch):
+    # A read timeout -- the gateway accepted the connection but never answered,
+    # the invalid-key / ungranted-slug stall in nori-monorepo#116 -- must NOT be
+    # retried (a retry only repeats the full-timeout hang) and must surface an
+    # APITimeoutError whose message points at the API key / slug.
+    from synthefy.api_client import APITimeoutError
+
+    monkeypatch.setattr("synthefy.nori_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ReadTimeout("read timed out")
+
+    client = SynthefyNoriClient(api_key="bad-key", max_retries=2, model="nori-30m")
+    _attach_mock(client, handler)
+
+    with pytest.raises(APITimeoutError) as exc_info:
+        client.predict(X_train=[[1.0]], y_train=[1.0], X_test=[[2.0]])
+
+    assert calls["n"] == 1  # not retried despite max_retries=2
+    msg = str(exc_info.value)
+    assert "BASETEN_API_KEY" in msg
+    assert "timed out" in msg
+
+
+def test_connection_error_still_retried_then_succeeds(monkeypatch):
+    # A connection error IS transient and must still be retried.
+    monkeypatch.setattr("synthefy.nori_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("transient reset")
+        return httpx.Response(
+            200, json={"task": "regression", "predictions": [3.0]}
+        )
+
+    client = SynthefyNoriClient(api_key="test-key", max_retries=2, model="nori-30m")
+    _attach_mock(client, handler)
+
+    preds = client.predict(X_train=[[1.0]], y_train=[1.0], X_test=[[2.0]])
+    assert preds == [3.0]
+    assert calls["n"] == 2
+
+
+def test_connection_error_message_enriched(monkeypatch):
+    from synthefy.api_client import APIConnectionError
+
+    monkeypatch.setattr("synthefy.nori_client.time.sleep", lambda _s: None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("name resolution failed")
+
+    client = SynthefyNoriClient(api_key="test-key", max_retries=0, model="nori-30m")
+    _attach_mock(client, handler)
+
+    with pytest.raises(APIConnectionError) as exc_info:
+        client.predict(X_train=[[1.0]], y_train=[1.0], X_test=[[2.0]])
+    assert "base_url" in str(exc_info.value)
+
+
+def test_request_timeout_is_structured():
+    # connect is bounded independently of the (larger) read budget, and a
+    # per-request override flows through with connect capped at the read budget.
+    client = SynthefyNoriClient(
+        api_key="test-key", timeout=300.0, connect_timeout=10.0, model="nori-30m"
+    )
+    t = client._request_timeout(None)
+    assert t.read == 300.0
+    assert t.connect == 10.0
+
+    t2 = client._request_timeout(5.0)
+    assert t2.read == 5.0
+    assert t2.connect == 5.0
+
+
 # --------------------------------------------------------------------------- #
 # Pydantic models
 # --------------------------------------------------------------------------- #

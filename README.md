@@ -400,10 +400,19 @@ The Nori client reuses the package's
 
 - HTTP `400` → `BadRequestError`, carrying the server's `error` string as the
   message (e.g. a missing field or unsupported task).
-- HTTP `401` → `AuthenticationError` (bad or missing key).
-- Transient errors (timeouts, connection errors, `429`, `5xx`) are retried with
-  exponential backoff, then surface as `RateLimitError` / `InternalServerError` /
-  `APITimeoutError` / `APIConnectionError`.
+- HTTP `401` → `AuthenticationError` (bad or missing key). Note: the Baseten
+  gateway does the key/slug check and does not always reject an invalid or
+  ungranted key with a prompt `401`; a bad key can instead stall until the read
+  timeout fires and surface as `APITimeoutError`, whose message spells out the
+  likely causes (invalid key, ungranted `model=` slug, or a cold start).
+- Transient failures (connection errors and `429` / `5xx` responses) are retried
+  with exponential backoff, then surface as `RateLimitError` /
+  `InternalServerError` / `APIConnectionError`. A **timeout is not retried**: it
+  already waited the full read budget, so a retry only repeats the hang.
+- `timeout` bounds *reading* the response (default 300 s, generous so a cold
+  start finishes in one attempt); `connect_timeout` (default 10 s) bounds
+  *establishing* the connection, so an unreachable host fails fast instead of
+  hanging for the full `timeout`.
 
 ### Local Usage (`mode="local"`, Optional, No Network)
 
@@ -483,7 +492,7 @@ continuous mean is already optimal for those metrics.
 
 ### SynthefyNoriClient (Tabular Regression)
 
-- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None)` — `model` is **required** (`"nori-6m"` / `"nori-30m"`; `None` for a dedicated endpoint)
+- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, connect_timeout=10.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None)`. `model` is **required** (`"nori-6m"` / `"nori-30m"`; `None` for a dedicated endpoint). `timeout` is the read budget; `connect_timeout` bounds establishing the connection.
   - `mode`: `"remote"` (hosted, default), `"local"` (in-process via
     `synthefy-nori`), or `"auto"` (local if installed, else remote).
   - `api_key` (remote mode) falls back to the `BASETEN_API_KEY` environment

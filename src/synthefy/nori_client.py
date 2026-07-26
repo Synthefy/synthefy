@@ -766,6 +766,48 @@ def _widen_text_columns(X_train, X_test, text_columns, svd_dim, embedder,
             pd.DataFrame(Xte, index=X_test.index))
 
 
+def _remote_failure_message(
+    *,
+    kind: str,
+    base_url: str,
+    endpoint: str,
+    model: Optional[str],
+    timeout: float,
+    original: str,
+) -> str:
+    """Build an actionable message for a remote request that timed out or could
+    not connect.
+
+    The Baseten inference gateway -- not this client -- does the API-key / slug
+    authorization, and it does not always reject a bad key with a prompt ``401``:
+    an invalid key, or a slug the key was never granted, can instead stall until
+    the client's read timeout fires. A bare "read timed out" then hides the most
+    likely cause, so this spells the causes out (see issue nori-monorepo#116).
+
+    ``kind`` is ``"timeout"`` or ``"connection"``.
+    """
+    where = f"{base_url.rstrip('/')}{endpoint} (model={model!r})"
+    if kind == "timeout":
+        return (
+            f"Nori prediction to {where} timed out after {timeout:g}s. "
+            "The most common causes, in order:\n"
+            "  1. an invalid or revoked Baseten API key -- the gateway can stall "
+            "instead of returning 401; check the api_key argument / "
+            "BASETEN_API_KEY;\n"
+            "  2. a model= slug your key was not granted -- confirm you were "
+            "given the size you requested;\n"
+            "  3. a cold start -- an idle model can take ~60-90s to warm up on "
+            "the first call; retry once, or raise timeout=.\n"
+            f"Underlying error: {original}"
+        )
+    return (
+        f"Nori prediction to {where} could not reach the server: {original}. "
+        "Check your network connection and that base_url is correct. If you just "
+        "created the key, also verify the api_key / BASETEN_API_KEY value and "
+        "that model= is a slug you were granted."
+    )
+
+
 class SynthefyNoriClient:
     """Client for Synthefy Nori in-context regression.
 
@@ -802,10 +844,19 @@ class SynthefyNoriClient:
     mode : {"remote", "local", "auto"}, default "remote"
         How predictions run. See above.
     timeout : float, default 300.0
-        Per-request timeout in seconds (remote mode).
+        Per-request timeout in seconds for *reading* the response (remote mode).
+        Generous by default so a cold start (an idle model can take ~60-90s to
+        warm up) completes in a single attempt.
+    connect_timeout : float, default 10.0
+        Timeout in seconds for *establishing* the connection to the gateway
+        (remote mode), capped at ``timeout`` when smaller. Bounds how long an
+        unreachable host or DNS failure hangs, independent of ``timeout``.
     max_retries : int, default 2
-        Number of retries for transient errors (timeouts, connection errors,
-        429 and 5xx responses) with exponential backoff (remote mode).
+        Number of retries, with exponential backoff, for transient failures --
+        connection errors and ``429`` / ``5xx`` responses (remote mode). A
+        *timeout* is not retried: it already waited the full budget, so a retry
+        only repeats the hang (e.g. an invalid key the gateway is slow to
+        reject); see :meth:`_should_retry`.
     base_url : str, default GATEWAY_BASE_URL
         Base URL of the inference host (remote mode).
     endpoint : str, default GATEWAY_ENDPOINT
@@ -861,6 +912,7 @@ class SynthefyNoriClient:
         *,
         mode: Mode = "remote",
         timeout: float = 300.0,
+        connect_timeout: float = 10.0,
         max_retries: int = 2,
         base_url: str = GATEWAY_BASE_URL,
         endpoint: str = GATEWAY_ENDPOINT,
@@ -901,6 +953,7 @@ class SynthefyNoriClient:
             )
 
         self.timeout = timeout
+        self.connect_timeout = connect_timeout
         self.max_retries = max_retries
         self.base_url = base_url
         self.endpoint = endpoint
@@ -1090,9 +1143,16 @@ class SynthefyNoriClient:
             In remote mode, if the server rejects the request (HTTP 400),
             carrying the server's ``error`` string as the message.
         AuthenticationError
-            In remote mode, if the API key is missing or invalid (HTTP 401).
+            In remote mode, if the gateway rejects the key with HTTP 401. Note
+            the gateway does not always reject an invalid or ungranted key
+            promptly -- a bad key can instead surface as ``APITimeoutError``
+            below, whose message spells out the likely causes.
         APITimeoutError
-            In remote mode, if the request times out.
+            In remote mode, if the request times out. Because the gateway may
+            stall rather than return 401, this is also the error a wrong API key
+            or an ungranted ``model=`` slug most often produces; the message
+            lists these causes. A timeout is not retried (a retry only repeats
+            the full-timeout hang).
         APIConnectionError
             In remote mode, if a network/connection error occurs.
         """
@@ -1194,12 +1254,40 @@ class SynthefyNoriClient:
         if self.model is not None:
             payload["model"] = self.model
 
-        response = self._post_with_retries(
-            self.endpoint,
-            json=payload,
-            headers=self._headers(extra_headers=extra_headers),
-            timeout=timeout,
-        )
+        effective_timeout = self.timeout if timeout is None else timeout
+        try:
+            response = self._post_with_retries(
+                self.endpoint,
+                json=payload,
+                headers=self._headers(extra_headers=extra_headers),
+                timeout=timeout,
+            )
+        except APITimeoutError as exc:
+            # Re-raise as the SAME type (so ``except APITimeoutError`` still
+            # catches it) but with a message that names the likely causes -- a
+            # wrong / ungranted key the gateway is slow to reject, not just a
+            # nondescript "read timed out" (nori-monorepo#116).
+            raise APITimeoutError(
+                _remote_failure_message(
+                    kind="timeout",
+                    base_url=self.base_url,
+                    endpoint=self.endpoint,
+                    model=self.model,
+                    timeout=effective_timeout,
+                    original=str(exc),
+                )
+            ) from exc
+        except APIConnectionError as exc:
+            raise APIConnectionError(
+                _remote_failure_message(
+                    kind="connection",
+                    base_url=self.base_url,
+                    endpoint=self.endpoint,
+                    model=self.model,
+                    timeout=effective_timeout,
+                    original=str(exc),
+                )
+            ) from exc
         parsed = NoriPredictResponse(**response.json())
         return parsed.predictions
 
@@ -1219,8 +1307,13 @@ class SynthefyNoriClient:
         self, response: Optional[httpx.Response], exc: Optional[Exception]
     ) -> bool:
         if exc is not None:
-            # Connection errors/timeouts are retryable
-            return True
+            # Connection errors are transient -> retry. A timeout is NOT: the
+            # request already waited out the full read budget, so a retry just
+            # repeats the same hang -- the classic invalid-key / ungranted-slug
+            # gateway stall, or a cold start longer than the timeout. Surface it
+            # immediately instead of tripling the wall-clock wait
+            # (nori-monorepo#116).
+            return not isinstance(exc, APITimeoutError)
         if response is None:
             return False
         if (
@@ -1246,6 +1339,20 @@ class SynthefyNoriClient:
         base = min(2**attempt, 30)
         return base * (0.5 + 0.5 * (os.urandom(1)[0] / 255))
 
+    def _request_timeout(self, timeout: Optional[float]) -> httpx.Timeout:
+        """Structured per-request timeout: a short bound on *connecting* to the
+        gateway, the full budget on *reading* the response.
+
+        Passing a bare float to httpx applies it to every phase (connect, read,
+        write, pool), so an unreachable host or DNS failure would hang for the
+        whole (large) read budget. Splitting them lets a connection failure
+        surface in ~``connect_timeout`` seconds while a legitimate cold start
+        still gets the full read window. ``connect`` is capped at the read budget
+        so an explicit short ``timeout=`` is never exceeded.
+        """
+        read = self.timeout if timeout is None else timeout
+        return httpx.Timeout(read, connect=min(self.connect_timeout, read))
+
     def _post_with_retries(
         self,
         endpoint: str,
@@ -1270,11 +1377,19 @@ class SynthefyNoriClient:
                     endpoint,
                     json=json,
                     headers=headers or self._headers(),
-                    timeout=timeout or self.timeout,
+                    timeout=self._request_timeout(timeout),
                 )
                 if not self._should_retry(response, None):
                     _raise_for_status(response)
                     return response
+            except httpx.ConnectTimeout as exc:
+                # A *connect* timeout is a cheap (~connect_timeout s) failure to
+                # establish the connection -- a network problem, not the gateway
+                # accepting the request and then stalling. Treat it as a
+                # connection error so it is retried (transient) and surfaced with
+                # network-oriented guidance, unlike a read timeout (which is not
+                # retried and points at the API key / slug). nori-monorepo#116.
+                last_exc = APIConnectionError(str(exc))
             except httpx.TimeoutException as exc:
                 last_exc = APITimeoutError(str(exc))
             except httpx.HTTPError as exc:

@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.1.0]
+
+### Fixed
+
+- **A wrong or ungranted Baseten API key no longer hangs silently.** The Baseten
+  inference gateway does the key/slug authorization and does not always reject a
+  bad key with a prompt `401`; it can stall until the client times out
+  (nori-monorepo#116). `SynthefyNoriClient` now:
+  - **does not retry a timeout.** A timeout already waited the full read budget,
+    so a retry only repeated the same hang (previously up to `(max_retries + 1) x
+    timeout`, i.e. ~15 min at the defaults). Connection errors and `429` / `5xx`
+    responses are still retried with exponential backoff.
+  - **surfaces an actionable message** on a remote timeout / connection failure,
+    naming the likely causes (invalid API key, ungranted `model=` slug, or a cold
+    start) instead of a bare "read timed out". The exception type is unchanged
+    (`APITimeoutError` / `APIConnectionError`), so existing handlers keep working.
+
+### Added
+
+- **`connect_timeout` constructor argument** (default `10.0` s) on
+  `SynthefyNoriClient`. `timeout` now governs only *reading* the response;
+  `connect_timeout` bounds *establishing* the connection, so an unreachable host
+  or DNS failure fails in ~10 s instead of hanging for the full `timeout`. It is
+  capped at `timeout` when `timeout` is smaller, so an explicit short `timeout=`
+  is never exceeded. A connect timeout is classified as a (retryable) connection
+  error, not a read timeout.
+
 ## [5.0.0]
 
 ### Changed (breaking)
