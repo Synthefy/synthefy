@@ -294,7 +294,7 @@ confirm with me before making changes.
 
 Prefer not to run it locally? Use the hosted API instead — sign up for a Baseten
 API key at https://docs.synthefy.com/setup/api_key, then:
-`client = SynthefyNoriClient(api_key="YOUR_BASETEN_API_KEY")` (or set BASETEN_API_KEY).
+`client = SynthefyNoriClient(api_key="YOUR_API_KEY")` (or set SYNTHEFY_NORI_API_KEY).
 ````
 
 ### Hosted Usage (`mode="remote"`)
@@ -302,9 +302,9 @@ API key at https://docs.synthefy.com/setup/api_key, then:
 ```python
 from synthefy import SynthefyNoriClient
 
-# Auth uses a Baseten API key, sent as `Authorization: Bearer <key>` (gateway default).
-# Pass it explicitly or set the BASETEN_API_KEY environment variable.
-client = SynthefyNoriClient(api_key="your_baseten_api_key")
+# The key is sent as `Authorization: Bearer <key>` (gateway default).
+# Pass it explicitly or set the SYNTHEFY_NORI_API_KEY environment variable.
+client = SynthefyNoriClient(api_key="your_api_key")
 
 predictions = client.predict(
     X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],  # context features
@@ -388,8 +388,9 @@ client = SynthefyNoriClient(
 
 - The only credential is a **Baseten API key** (there is no separate Synthefy
   key for this endpoint).
-- Provide it via the `api_key` argument or the `BASETEN_API_KEY` environment
-  variable. It is sent as the header `Authorization: <auth_scheme> <key>`. The
+- Provide it via the `api_key` argument or the `SYNTHEFY_NORI_API_KEY`
+  environment variable (`BASETEN_API_KEY` is still accepted). It is sent as the
+  header `Authorization: <auth_scheme> <key>`. The
   scheme defaults to `Bearer` (required by the gateway); pass
   `auth_scheme="Api-Key"` for a dedicated deployment.
 
@@ -486,8 +487,8 @@ continuous mean is already optimal for those metrics.
 - `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None)` — `model` is **required** (`"nori-6m"` / `"nori-30m"`; `None` for a dedicated endpoint)
   - `mode`: `"remote"` (hosted, default), `"local"` (in-process via
     `synthefy-nori`), or `"auto"` (local if installed, else remote).
-  - `api_key` (remote mode) falls back to the `BASETEN_API_KEY` environment
-    variable. Not required in local mode.
+  - `api_key` (remote mode) falls back to the `SYNTHEFY_NORI_API_KEY`
+    environment variable. Not required in local mode.
   - For a dedicated deployment, pass `base_url`/`endpoint` and `model=None`.
 - `predict(X_train, y_train, X_test, task="regression", *, timeout=None, extra_headers=None) -> List[float]`
   - Returns one predicted value per row of `X_test`. `timeout`/`extra_headers`
@@ -575,7 +576,8 @@ Each status error includes:
 ### Environment Variables
 
 - `SYNTHEFY_API_KEY`: Your Synthefy API key (forecasting client)
-- `BASETEN_API_KEY`: Your Baseten API key (`SynthefyNoriClient`)
+- `SYNTHEFY_NORI_API_KEY`: Your hosted-Nori API key (`SynthefyNoriClient`).
+  `BASETEN_API_KEY` is still accepted as a fallback.
 
 ## Support
 
