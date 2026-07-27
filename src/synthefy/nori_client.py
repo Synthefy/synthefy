@@ -803,9 +803,9 @@ class SynthefyNoriClient:
     ----------
     api_key : str or None, optional
         API key for hosted Nori (remote mode only). If ``None``, falls back to
-        the ``SYNTHEFY_NORI_API_KEY`` environment variable (and, for backwards
-        compatibility, ``BASETEN_API_KEY``). A :class:`ValueError` is raised if
-        neither is set when remote mode is in effect.
+        the ``SYNTHEFY_NORI_API_KEY`` environment variable. A
+        :class:`ValueError` is raised if neither is set when remote mode is in
+        effect.
     mode : {"remote", "local", "auto"}, default "remote"
         How predictions run. See above.
     timeout : float, default 300.0

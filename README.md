@@ -389,8 +389,8 @@ client = SynthefyNoriClient(
 - The only credential is a **Baseten API key** (there is no separate Synthefy
   key for this endpoint).
 - Provide it via the `api_key` argument or the `SYNTHEFY_NORI_API_KEY`
-  environment variable (`BASETEN_API_KEY` is still accepted). It is sent as the
-  header `Authorization: <auth_scheme> <key>`. The
+  environment variable. It is sent as the header
+  `Authorization: <auth_scheme> <key>`. The
   scheme defaults to `Bearer` (required by the gateway); pass
   `auth_scheme="Api-Key"` for a dedicated deployment.
 
@@ -576,8 +576,7 @@ Each status error includes:
 ### Environment Variables
 
 - `SYNTHEFY_API_KEY`: Your Synthefy API key (forecasting client)
-- `SYNTHEFY_NORI_API_KEY`: Your hosted-Nori API key (`SynthefyNoriClient`).
-  `BASETEN_API_KEY` is still accepted as a fallback.
+- `SYNTHEFY_NORI_API_KEY`: Your hosted-Nori API key (`SynthefyNoriClient`)
 
 ## Support
 
