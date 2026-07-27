@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.3.0]
+
+### Added
+
+- **`synthefy[timeseries]` extra + `NoriTSForecaster`** — local Nori time-series
+  forecasting (TabPFN-TS-style tabular regression on time features). Install with
+  `pip install "synthefy[timeseries]"`, then `from synthefy import NoriTSForecaster`.
+  The re-export is lazy, so a plain `import synthefy` still pulls no extra deps.
+  Requires `synthefy-nori>=0.15.0`, which includes the `nori_ts` module and the
+  multi-series featurization/RAM improvements promoted from internal #318.
+
 ## [6.2.2]
 
 ### Changed

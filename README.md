@@ -30,6 +30,12 @@ For optional fully-local tabular inference (no API key, runs in-process), instal
 pip install "synthefy[local]"
 ```
 
+For local time-series forecasting (`NoriTSForecaster`):
+
+```bash
+pip install "synthefy[timeseries]"
+```
+
 ## Quick Start
 
 ### Basic Usage
