@@ -45,8 +45,6 @@ GATEWAY_ENDPOINT = "/predict"
 # Environment variable holding the hosted-Nori API key. Matches SYNTHEFY_API_KEY
 # used by SynthefyAPIClient, so the whole package reads one naming scheme.
 NORI_API_KEY_ENV = "SYNTHEFY_NORI_API_KEY"
-# Accepted as a fallback so existing deployments keep working; undocumented.
-_LEGACY_API_KEY_ENV = "BASETEN_API_KEY"
 
 # Sentinel for a required ``model=`` (there is no default -- every caller names a size). Kept
 # distinct from ``None``, which is a valid, meaningful value: a dedicated deployment endpoint that
@@ -925,11 +923,7 @@ class SynthefyNoriClient:
 
         if mode == "remote":
             if api_key is None:
-                # SYNTHEFY_NORI_API_KEY is the documented name; BASETEN_API_KEY is
-                # still honoured for callers written against earlier releases.
-                api_key = os.getenv(NORI_API_KEY_ENV) or os.getenv(
-                    _LEGACY_API_KEY_ENV
-                )
+                api_key = os.getenv(NORI_API_KEY_ENV)
             if not api_key:
                 raise ValueError(
                     "A Synthefy Nori API key must be provided either as the "

@@ -292,8 +292,8 @@ up alongside it on the same train/test split and metric so I can compare them. I
 the best place to plug Nori in isn't obvious, show me where you'd put it and
 confirm with me before making changes.
 
-Prefer not to run it locally? Use the hosted API instead — sign up for a Baseten
-API key at https://docs.synthefy.com/setup/api_key, then:
+Prefer not to run it locally? Use the hosted API instead — create a key at
+https://docs.synthefy.com/setup/api_key, then:
 `client = SynthefyNoriClient(api_key="YOUR_API_KEY")` (or set SYNTHEFY_NORI_API_KEY).
 ````
 
@@ -374,7 +374,7 @@ field):
 from synthefy.nori_client import DEDICATED_BASE_URL, DEDICATED_ENDPOINT
 
 client = SynthefyNoriClient(
-    api_key="your_baseten_api_key",
+    api_key="your_api_key",
     base_url=DEDICATED_BASE_URL,    # https://model-3m5j7y9w.api.baseten.co
     endpoint=DEDICATED_ENDPOINT,    # /environments/production/predict
     model=None,
@@ -386,8 +386,9 @@ client = SynthefyNoriClient(
 
 #### Authentication
 
-- The only credential is a **Baseten API key** (there is no separate Synthefy
-  key for this endpoint).
+- The only credential is your **Synthefy Nori API key**, created in the Synthefy
+  Console. It authenticates against the Baseten-hosted gateway, but you do not
+  need a Baseten account.
 - Provide it via the `api_key` argument or the `SYNTHEFY_NORI_API_KEY`
   environment variable. It is sent as the header
   `Authorization: <auth_scheme> <key>`. The
@@ -439,7 +440,7 @@ transparently fall back to the hosted endpoint (which then requires an API key)
 otherwise:
 
 ```python
-client = SynthefyNoriClient(api_key="your_baseten_api_key", mode="auto")
+client = SynthefyNoriClient(api_key="your_api_key", mode="auto")
 print(client.mode)  # "local" if synthefy-nori is installed, else "remote"
 ```
 

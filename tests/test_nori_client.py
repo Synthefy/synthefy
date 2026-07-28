@@ -665,24 +665,18 @@ def test_dedicated_endpoint_config_omits_model_field():
 
 
 def test_api_key_from_env(monkeypatch):
-    monkeypatch.delenv("BASETEN_API_KEY", raising=False)
     monkeypatch.setenv("SYNTHEFY_NORI_API_KEY", "env-key")
     client = SynthefyNoriClient(model="nori-30m")
     assert client.api_key == "env-key"
     assert client.mode == "remote"
 
 
-def test_api_key_from_legacy_baseten_env(monkeypatch):
-    """BASETEN_API_KEY still works for callers written against earlier releases."""
+def test_baseten_env_is_not_read(monkeypatch):
+    """BASETEN_API_KEY was the pre-5.0 name and is no longer honoured."""
     monkeypatch.delenv("SYNTHEFY_NORI_API_KEY", raising=False)
     monkeypatch.setenv("BASETEN_API_KEY", "legacy-key")
-    assert SynthefyNoriClient(model="nori-30m").api_key == "legacy-key"
-
-
-def test_synthefy_env_wins_over_legacy(monkeypatch):
-    monkeypatch.setenv("SYNTHEFY_NORI_API_KEY", "preferred")
-    monkeypatch.setenv("BASETEN_API_KEY", "legacy")
-    assert SynthefyNoriClient(model="nori-30m").api_key == "preferred"
+    with pytest.raises(ValueError, match="SYNTHEFY_NORI_API_KEY"):
+        SynthefyNoriClient(model="nori-30m")
 
 
 def test_explicit_api_key_wins_over_env(monkeypatch):
@@ -692,14 +686,12 @@ def test_explicit_api_key_wins_over_env(monkeypatch):
 
 def test_missing_api_key_raises_in_remote_mode(monkeypatch):
     monkeypatch.delenv("SYNTHEFY_NORI_API_KEY", raising=False)
-    monkeypatch.delenv("BASETEN_API_KEY", raising=False)
     with pytest.raises(ValueError, match="SYNTHEFY_NORI_API_KEY"):
         SynthefyNoriClient(model="nori-30m")
 
 
 def test_local_mode_needs_no_api_key(monkeypatch):
     monkeypatch.delenv("SYNTHEFY_NORI_API_KEY", raising=False)
-    monkeypatch.delenv("BASETEN_API_KEY", raising=False)
     client = SynthefyNoriClient(mode="local", model="nori-30m")
     assert client.mode == "local"
     assert client.client is None
