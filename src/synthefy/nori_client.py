@@ -927,7 +927,15 @@ def _nullable_rows_to_array(rows: Sequence[Sequence[Optional[float]]]) -> "np.nd
     value the local package would have returned) rather than leaving ``None``
     objects in a numeric result.
     """
-    arr = np.asarray(rows, dtype=float)
+    try:
+        arr = np.asarray(rows, dtype=float)
+    except (ValueError, TypeError) as exc:
+        # Ragged rows: numpy >= 2 rejects an inhomogeneous shape. Report it as a
+        # malformed response rather than letting the raw numpy message surface.
+        raise ValueError(
+            "The server returned a malformed quantile block (rows of unequal "
+            f"length): {exc}"
+        ) from exc
     if arr.ndim != 2:
         raise ValueError(
             "The server returned a malformed quantile block: expected a 2D "
@@ -1312,7 +1320,11 @@ class SynthefyNoriClient:
             - ``"full"`` — the whole quantile bank as a dict with keys
               ``"quantiles"`` (``(n_query, K)`` ascending values), ``"taus"``
               (``(K,)`` levels) and ``"mean"`` (``(n_query,)``) — for CRPS /
-              interval scoring and calibration work.
+              interval scoring and calibration work. Its ``"mean"`` is the bank's
+              own mean, which can differ slightly from ``output_type="mean"``:
+              the point path runs the model's augmentation (Yeo-Johnson)
+              ensemble and the quantile bank deliberately does not. Inherited
+              from ``NoriRegressor``, so it is the same in either mode.
 
             Quantiles come back in original-``y`` units, sorted to a valid
             (monotone) quantile function per row. Everything other than
@@ -1836,11 +1848,21 @@ class SynthefyNoriClient:
                 f"{q_by_row.shape}, expected {expected} "
                 "(one row per X_test row, one column per tau level)."
             )
-        if request.quantiles is not None and taus.shape[0] != len(request.quantiles):
-            raise ValueError(
-                f"Requested {len(request.quantiles)} quantile level(s) but the "
-                f"server returned {taus.shape[0]}."
-            )
+        if request.quantiles is not None:
+            requested = np.asarray(request.quantiles, dtype=float)
+            if taus.shape[0] != requested.shape[0]:
+                raise ValueError(
+                    f"Requested {requested.shape[0]} quantile level(s) but the "
+                    f"server returned {taus.shape[0]}."
+                )
+            # The returned levels must be the requested ones, in order: the
+            # columns are labeled from the request, so levels that drifted would
+            # mean data at one tau labeled with another.
+            if not np.allclose(taus, requested, rtol=0.0, atol=1e-9):
+                raise ValueError(
+                    f"Requested quantile levels {requested.tolist()} but the "
+                    f"server returned {taus.tolist()}."
+                )
         return q_by_row, taus, np.asarray(parsed.predictions, dtype=float)
 
     def _headers(

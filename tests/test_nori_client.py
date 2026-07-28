@@ -2220,3 +2220,31 @@ def test_local_quantiles_real_inference():
     assert np.all((taus > 0.0) & (taus < 1.0))
     # "full"'s mean is the same quantity output_type="mean" collapses to.
     assert np.allclose(full["mean"], np.asarray(mean), atol=0.15)
+
+
+def test_remote_drifted_quantile_levels_raise():
+    # Columns are labeled from the request, so levels that came back different
+    # would mean data at one tau labeled with another.
+    client = _remote_client()
+    _attach_mock(client, _dist_handler(
+        {}, predictions=[1.0],
+        quantiles=[[0.5, 1.0, 1.5]], taus=[0.1, 0.5, 0.95],  # 0.9 -> 0.95
+    ))
+    with pytest.raises(ValueError, match="server returned"):
+        client.predict(
+            _XTR, _YTR, [[2.0, 2.0]], output_type="quantiles", quantiles=_LEVELS
+        )
+
+
+def test_remote_ragged_quantile_block_raises_a_clear_error():
+    client = _remote_client()
+    _attach_mock(client, _dist_handler(
+        {}, predictions=[1.0, 2.0],
+        quantiles=[[0.5, 1.0, 1.5], [1.5, 2.0]],  # second row short
+        taus=_LEVELS,
+    ))
+    with pytest.raises(ValueError, match="rows of unequal length"):
+        client.predict(
+            _XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]],
+            output_type="quantiles", quantiles=_LEVELS,
+        )
