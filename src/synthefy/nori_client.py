@@ -3,7 +3,9 @@
 Synthefy Nori is an in-context learning regressor: each call supplies labeled
 context rows (``X_train``, ``y_train``) and query rows (``X_test``), and the model
 returns one predicted value per query row in a single forward pass -- there is no
-training step.
+training step. The same forward pass also carries a full predictive distribution,
+so ``predict(output_type="quantiles", quantiles=[...])`` returns calibrated
+prediction intervals at no extra cost.
 
 This module is self-contained and does not depend on the forecasting client
 (:class:`synthefy.api_client.SynthefyAPIClient`). It does, however, reuse the
@@ -137,6 +139,17 @@ def _resolve_local_variant(model: Optional[str]) -> Optional[str]:
 
 DEFAULT_TASK = "regression"
 
+# What ``predict`` returns from the model's predictive distribution. These names and
+# their meanings mirror ``synthefy_nori.NoriRegressor.predict``'s ``output_type``
+# exactly, so the argument means the same thing whether a call runs locally or
+# against the hosted endpoint.
+#   point         -> one value per query row (a summary of the distribution)
+#   distribution  -> the quantile function itself (prediction intervals, CRPS, ...)
+_POINT_OUTPUT_TYPES = ("mean", "median", "mode")
+_DISTRIBUTION_OUTPUT_TYPES = ("quantiles", "full")
+_OUTPUT_TYPES = _POINT_OUTPUT_TYPES + _DISTRIBUTION_OUTPUT_TYPES
+DEFAULT_OUTPUT_TYPE = "mean"
+
 Mode = Literal["remote", "local", "auto"]
 _VALID_MODES = ("remote", "local", "auto")
 
@@ -177,6 +190,15 @@ class NoriPredictRequest(BaseModel):
         ``"max_context"``, ``"off"``) or an object of policy fields. Omitted from
         the wire payload entirely when unset, so a request that does not use it is
         byte-for-byte what it always was.
+    output_type : str or None, optional
+        What to return from the predictive distribution (``"mean"``,
+        ``"median"``, ``"quantiles"``, ``"full"``). ``None`` means
+        "the server default", which is ``"mean"``; it is **omitted from the
+        request body** so the default request is byte-for-byte what earlier
+        client versions sent.
+    quantiles : List[float] or None, optional
+        Tau levels in ``(0, 1)`` for ``output_type="quantiles"``, in the caller's
+        order. Omitted from the body when ``None``.
     """
 
     # validate_assignment so `request.memory_policy = {...}` is COERCED into MemoryPolicy the
@@ -190,6 +212,8 @@ class NoriPredictRequest(BaseModel):
     X_test: List[List[float]]
     task: str = DEFAULT_TASK
     memory_policy: Optional[MemoryPolicyInput] = None
+    output_type: Optional[str] = None
+    quantiles: Optional[List[float]] = None
 
 
 class NoriPredictResponse(BaseModel):
@@ -200,15 +224,37 @@ class NoriPredictResponse(BaseModel):
     task : str
         The task echoed back by the server (e.g. ``"regression"``).
     predictions : List[float]
-        One predicted value per row of ``X_test``.
+        One point prediction per row of ``X_test``: the summary named by the
+        request's ``output_type``, or the distribution mean when a
+        distribution output (``"quantiles"``/``"full"``) was requested.
     memory_report : dict, optional
         Present only when the request set ``memory_policy``: what the server actually did
         about it. See :attr:`SynthefyNoriClient.last_memory_report`.
+    output_type : str or None, optional
+        The output type the server actually honored. A deployment that predates
+        distribution output omits this field, which is how the client detects
+        that its ``output_type`` was silently ignored (see
+        :meth:`SynthefyNoriClient._predict_remote`) instead of handing back
+        means labeled as something else.
+    quantiles : List[List[float]] or None, optional
+        The predictive quantile function, **one row per query row**:
+        ``(n_query, K)`` ascending values in original-``y`` units. For
+        ``output_type="quantiles"`` ``K`` is the number of requested levels (in
+        the requested order, not sorted); for ``"full"`` it is the checkpoint's
+        whole quantile bank. Present only when a distribution output was
+        requested. Entries are nullable because JSON has no ``NaN``: the server
+        sends ``null`` for a non-finite value and the client maps it back to
+        ``NaN``.
+    taus : List[float] or None, optional
+        The ``K`` quantile levels matching ``quantiles``' columns.
     """
 
     task: str
     predictions: List[float]
     memory_report: Optional[MemoryReport] = None
+    output_type: Optional[str] = None
+    quantiles: Optional[List[List[Optional[float]]]] = None
+    taus: Optional[List[float]] = None
 
 
 def _frame_columns(arr: Any) -> Optional[List[Any]]:
@@ -546,6 +592,8 @@ def _build_nori_request(
     task: str = DEFAULT_TASK,
     max_categorical_cardinality: int = _DEFAULT_MAX_CARDINALITY,
     categorical_encoding: str = _DEFAULT_CATEGORICAL_ENCODING,
+    output_type: str = DEFAULT_OUTPUT_TYPE,
+    quantile_levels: Optional[List[float]] = None,
 ) -> NoriPredictRequest:
     """Validate shapes and build a :class:`NoriPredictRequest`.
 
@@ -559,6 +607,10 @@ def _build_nori_request(
     Otherwise columns are matched positionally, as before. Raises ``ValueError``
     on any shape mismatch before a request leaves the process. NaN/missing
     values are preserved and imputed server-side.
+
+    ``output_type``/``quantile_levels`` are expected to have been validated
+    already (by :func:`_validate_output_type`); a default ``output_type`` leaves
+    both fields unset so the request body is unchanged from earlier versions.
     """
     if max_categorical_cardinality < 1:
         raise ValueError(
@@ -649,6 +701,10 @@ def _build_nori_request(
         y_train=y_train_arr.tolist(),
         X_test=X_test_arr.tolist(),
         task=task,
+        # Left as None for the default so the serialized body carries neither
+        # field (see _predict_remote's exclude_none dump).
+        output_type=None if output_type == DEFAULT_OUTPUT_TYPE else output_type,
+        quantiles=quantile_levels,
     )
 
 
@@ -675,6 +731,76 @@ def _load_local_predict() -> Any:
             'package. Install it with: pip install "synthefy[local]".'
         ) from exc
     return local_predict
+
+
+def _validate_output_type(
+    output_type: str,
+    quantiles: Optional[VectorLike],
+    *,
+    discretizing: bool,
+) -> Optional[List[float]]:
+    """Check ``output_type``/``quantiles`` and normalize the tau levels.
+
+    The rules are ``NoriRegressor.predict``'s, enforced here so a bad argument
+    raises before any expensive work (text embedding, a network round-trip, or a
+    checkpoint load) rather than after it. Returns the tau levels as a plain
+    ``list[float]`` in the **caller's order** — order is meaningful, since it is
+    the order of the returned rows (``lo, mid, hi = ...``) — or ``None`` when no
+    levels were given.
+    """
+    if output_type not in _OUTPUT_TYPES:
+        raise ValueError(
+            f"output_type must be one of {_OUTPUT_TYPES}; got {output_type!r}."
+        )
+    if discretizing and (output_type != DEFAULT_OUTPUT_TYPE or quantiles is not None):
+        raise ValueError(
+            "categorical output (discretize=/categorical_levels=) returns "
+            "discrete labels, so it combines only with the default "
+            f"output_type={DEFAULT_OUTPUT_TYPE!r} (the discretize= strategy "
+            "chooses the summary), not with output_type/quantiles."
+        )
+    if quantiles is not None and output_type != "quantiles":
+        raise ValueError(
+            "quantiles= is only valid with output_type='quantiles'; got "
+            f"output_type={output_type!r}."
+        )
+    if output_type != "quantiles":
+        return None
+    if quantiles is None:
+        raise ValueError(
+            "output_type='quantiles' requires quantiles=[...] with at least one "
+            "tau level in (0, 1), e.g. quantiles=[0.1, 0.5, 0.9] for an 80% "
+            "interval around the median."
+        )
+    levels = np.asarray(quantiles, dtype=float).reshape(-1)
+    if levels.size == 0:
+        raise ValueError(
+            "output_type='quantiles' requires quantiles=[...] with at least one "
+            "tau level in (0, 1); got an empty sequence."
+        )
+    if not np.all(np.isfinite(levels)) or np.any((levels <= 0.0) | (levels >= 1.0)):
+        raise ValueError(
+            f"quantiles must lie strictly in (0, 1); got {quantiles!r}."
+        )
+    return [float(level) for level in levels]
+
+
+def _load_local_regressor() -> Any:
+    """Lazily import ``synthefy_nori.NoriRegressor`` with a helpful error if absent.
+
+    Needed for every ``output_type`` other than ``"mean"``: the functional
+    ``synthefy_nori.predict`` cannot reach them, because it forwards ``**kwargs``
+    to the ``NoriRegressor`` *constructor* and only passes ``discretize`` /
+    ``categorical_levels`` through to ``predict``.
+    """
+    try:
+        from synthefy_nori import NoriRegressor
+    except ImportError as exc:
+        raise ImportError(
+            "Local nori inference requires the optional 'synthefy-nori' "
+            'package. Install it with: pip install "synthefy[local]".'
+        ) from exc
+    return NoriRegressor
 
 
 def _local_discretize_available() -> bool:
@@ -763,6 +889,108 @@ def _snap_to_levels(predictions: List[float], levels: "np.ndarray") -> List[floa
     nearest = np.abs(preds[finite, None] - levels[None, :]).argmin(axis=1)
     snapped[finite] = levels[nearest]
     return snapped.tolist()
+
+
+# --------------------------------------------------------------------------- #
+# Distribution output shaping (output_type="quantiles" / "full")
+# --------------------------------------------------------------------------- #
+
+def _quantile_frame(
+    values: "np.ndarray",
+    levels: Sequence[float],
+    *,
+    X_test: Any,
+    y_train: Any,
+) -> pd.DataFrame:
+    """Build the ``as_pandas`` quantile frame: one row per query row, one column
+    per tau level.
+
+    Columns are named ``"<target>[<level>]"`` — the same convention the
+    forecasting client uses for its quantile columns, so both halves of the
+    package label quantiles the same way. Indexed by ``X_test`` when it is a
+    pandas object, so the bands join straight back onto the query rows.
+    """
+    name = _target_name(y_train)
+    return pd.DataFrame(
+        values,
+        index=_result_index(X_test),
+        columns=[f"{name}[{level}]" for level in levels],
+        dtype=float,
+    )
+
+
+def _nullable_rows_to_array(rows: Sequence[Sequence[Optional[float]]]) -> "np.ndarray":
+    """Coerce the wire's nullable quantile rows to a 2D float array.
+
+    JSON cannot carry ``NaN``, so the server sends ``null`` for a non-finite
+    quantile; ``np.asarray(..., dtype=float)`` maps those back to ``NaN`` (the
+    value the local package would have returned) rather than leaving ``None``
+    objects in a numeric result.
+    """
+    arr = np.asarray(rows, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError(
+            "The server returned a malformed quantile block: expected a 2D "
+            f"(n_query, n_levels) array, got shape {arr.shape}."
+        )
+    return arr
+
+
+def _shape_quantiles(
+    q_by_row: "np.ndarray",
+    levels: Sequence[float],
+    *,
+    as_pandas: bool,
+    X_test: Any,
+    y_train: Any,
+) -> Union[List[List[float]], pd.DataFrame]:
+    """Shape an ``(n_query, n_levels)`` block into the ``output_type="quantiles"`` result.
+
+    The default result is transposed to ``(n_levels, n_query)`` — level-major —
+    which is ``NoriRegressor.predict``'s shape and what makes
+    ``lo, mid, hi = client.predict(..., quantiles=[0.1, 0.5, 0.9])`` work. The
+    pandas result stays row-major, because a DataFrame indexed by the query rows
+    is what joins back onto the data.
+    """
+    if as_pandas:
+        return _quantile_frame(q_by_row, levels, X_test=X_test, y_train=y_train)
+    return q_by_row.T.tolist()
+
+
+def _shape_full(
+    q_by_row: "np.ndarray",
+    taus: "np.ndarray",
+    mean: "np.ndarray",
+    *,
+    as_pandas: bool,
+    X_test: Any,
+    y_train: Any,
+) -> Dict[str, Any]:
+    """Shape the whole quantile bank into the ``output_type="full"`` result.
+
+    Mirrors ``NoriRegressor.predict(output_type="full")``'s dict — ``"quantiles"``
+    row-major ``(n_query, K)``, ``"taus"`` ``(K,)``, ``"mean"`` ``(n_query,)`` —
+    with lists (or pandas objects under ``as_pandas``) in place of numpy arrays,
+    matching how the rest of this client returns data.
+    """
+    if as_pandas:
+        return {
+            "quantiles": _quantile_frame(
+                q_by_row, taus.tolist(), X_test=X_test, y_train=y_train
+            ),
+            "taus": taus.tolist(),
+            "mean": pd.Series(
+                mean,
+                index=_result_index(X_test),
+                name=_target_name(y_train),
+                dtype=float,
+            ),
+        }
+    return {
+        "quantiles": q_by_row.tolist(),
+        "taus": taus.tolist(),
+        "mean": mean.tolist(),
+    }
 
 
 def _widen_text_columns(X_train, X_test, text_columns, svd_dim, embedder,
@@ -882,6 +1110,14 @@ class SynthefyNoriClient:
     ... )
     >>> len(preds)
     1
+
+    Prediction intervals come from the same forward pass -- no conformal or
+    quantile-regression add-ons:
+
+    >>> lo, mid, hi = client.predict(          # doctest: +SKIP
+    ...     X_train, y_train, X_test,
+    ...     output_type="quantiles", quantiles=[0.1, 0.5, 0.9],
+    ... )
 
     Run the same prediction locally (no API key, needs ``synthefy[local]``):
 
@@ -1003,6 +1239,8 @@ class SynthefyNoriClient:
         task: str = DEFAULT_TASK,
         *,
         as_pandas: bool = False,
+        output_type: str = DEFAULT_OUTPUT_TYPE,
+        quantiles: Optional[VectorLike] = None,
         max_categorical_cardinality: int = _DEFAULT_MAX_CARDINALITY,
         categorical_encoding: str = _DEFAULT_CATEGORICAL_ENCODING,
         text_columns: Optional[Sequence[str]] = None,
@@ -1013,7 +1251,7 @@ class SynthefyNoriClient:
         memory_policy: Optional[MemoryPolicyInput] = None,
         timeout: Optional[float] = None,
         extra_headers: Optional[Dict[str, str]] = None,
-    ) -> Union[List[float], pd.Series]:
+    ) -> Union[List[float], pd.Series, List[List[float]], pd.DataFrame, Dict[str, Any]]:
         """Predict a value for each query row via in-context regression.
 
         Parameters
@@ -1047,11 +1285,46 @@ class SynthefyNoriClient:
         task : str, default "regression"
             The prediction task. Currently only ``"regression"`` is supported.
         as_pandas : bool, default False
-            If ``True``, return a pandas ``Series`` instead of a list: one value
-            per ``X_test`` row, named after ``y_train`` (its ``Series`` name or
-            single-column ``DataFrame`` label, else ``"prediction"``) and indexed
-            by ``X_test``'s index when ``X_test`` is a pandas object (so the
-            predictions join straight back). Default is the plain ``list``.
+            If ``True``, return pandas objects instead of lists: a ``Series``
+            for a point ``output_type`` (one value per ``X_test`` row) or a
+            ``DataFrame`` for ``output_type="quantiles"``/``"full"`` (one row per
+            ``X_test`` row, one column per tau level, named
+            ``"<target>[<level>]"``). Either way the result is named after
+            ``y_train`` (its ``Series`` name or single-column ``DataFrame``
+            label, else ``"prediction"``) and indexed by ``X_test``'s index when
+            ``X_test`` is a pandas object, so predictions join straight back.
+            Default is plain ``list``/``dict``.
+        output_type : {"mean", "median", "mode", "quantiles", "full"}, default "mean"
+            What to return from the model's predictive distribution — the same
+            selector, with the same meanings, as
+            ``synthefy_nori.NoriRegressor.predict``:
+
+            - ``"mean"`` (default) — the distribution mean, one value per query
+              row. Optimal for squared error / R², and byte-for-byte the
+              behavior of earlier client versions.
+            - ``"median"`` / ``"mode"`` — the distribution median (MAE-optimal)
+              or mode, one value per query row.
+            - ``"quantiles"`` — **prediction intervals**: the predictive
+              quantiles at the levels in ``quantiles=``. Returns
+              ``(n_levels, n_query)`` — level-major, so
+              ``lo, mid, hi = client.predict(..., quantiles=[0.1, 0.5, 0.9])``
+              unpacks directly.
+            - ``"full"`` — the whole quantile bank as a dict with keys
+              ``"quantiles"`` (``(n_query, K)`` ascending values), ``"taus"``
+              (``(K,)`` levels) and ``"mean"`` (``(n_query,)``) — for CRPS /
+              interval scoring and calibration work.
+
+            Quantiles come back in original-``y`` units, sorted to a valid
+            (monotone) quantile function per row. Everything other than
+            ``"mean"`` needs the model's predictive distribution, so it requires
+            local mode or a hosted deployment that serves distribution output —
+            see *Raises*.
+        quantiles : array-like of float or None, optional
+            Tau levels for ``output_type="quantiles"``, strictly inside
+            ``(0, 1)`` — e.g. ``[0.1, 0.5, 0.9]`` for an 80% interval around the
+            median. Required by (and valid only with) ``output_type="quantiles"``;
+            the returned rows follow the order given here, so the order is
+            yours to choose.
         max_categorical_cardinality : int, default 100
             Maximum number of distinct training values a non-numeric column may
             have to be encoded (DataFrame inputs only). Columns above this cap —
@@ -1140,7 +1413,16 @@ class SynthefyNoriClient:
         Returns
         -------
         list of float, or pandas.Series if ``as_pandas=True``
-            One predicted value per row of ``X_test``.
+            For a point ``output_type`` (``"mean"``/``"median"``/``"mode"``):
+            one predicted value per row of ``X_test``.
+        list of list of float, or pandas.DataFrame if ``as_pandas=True``
+            For ``output_type="quantiles"``: the quantiles as
+            ``(n_levels, n_query)`` — level-major, matching
+            ``NoriRegressor.predict`` — or, as pandas, a ``(n_query, n_levels)``
+            frame with one column per level.
+        dict
+            For ``output_type="full"``: ``{"quantiles", "taus", "mean"}``, with
+            lists (or a ``DataFrame`` and a ``Series`` under ``as_pandas=True``).
 
         Raises
         ------
@@ -1153,14 +1435,27 @@ class SynthefyNoriClient:
             column has unsupported ``timedelta`` dtype; if a non-DataFrame input
             contains non-numeric values; if ``categorical_encoding`` is not one
             of ``"ordinal"``/``"onehot"``; if featurization leaves no usable
-            columns; or, in remote mode, if ``discretize`` is a strategy other
-            than ``"snap-mean"`` (or ``categorical_levels`` is passed without
-            ``discretize=``, or is empty/non-finite).
+            columns; if ``output_type`` is not one of the five names, or
+            ``quantiles`` is missing/empty/outside ``(0, 1)`` for
+            ``output_type="quantiles"``, or is passed with a different
+            ``output_type``, or is combined with
+            ``discretize=``/``categorical_levels=``; or, in remote mode, if
+            ``discretize`` is a strategy other than ``"snap-mean"`` (or
+            ``categorical_levels`` is passed without ``discretize=``, or is
+            empty/non-finite), or if the hosted deployment does not serve the
+            requested ``output_type`` (it echoes back the type it honored, so an
+            ignored ``output_type`` raises here instead of silently returning
+            means — use local mode, or a deployment with distribution support).
         ImportError
             In local mode, if the optional ``synthefy-nori`` package is not
             installed (with guidance to ``pip install "synthefy[local]"``), or
-            if it is too old for ``discretize=``/``categorical_levels=``
-            (with an upgrade hint).
+            if it is too old for ``discretize=``/``categorical_levels=`` or for
+            a non-default ``output_type`` (with an upgrade hint).
+        NotImplementedError
+            If the checkpoint cannot produce a predictive distribution — in
+            local mode, ``output_type="quantiles"``/``"full"`` on a
+            ``bar_distribution`` checkpoint (the default pinball checkpoint is
+            required); raised by ``synthefy-nori``.
         BadRequestError
             In remote mode, if the server rejects the request (HTTP 400),
             carrying the server's ``error`` string as the message.
@@ -1177,6 +1472,14 @@ class SynthefyNoriClient:
         APIConnectionError
             In remote mode, if a network/connection error occurs.
         """
+        # Validate the output contract first: a bad output_type/quantiles pair is
+        # caught before the expensive steps below (loading a sentence encoder for
+        # text_columns, a checkpoint, or a paid network round-trip).
+        quantile_levels = _validate_output_type(
+            output_type,
+            quantiles,
+            discretizing=discretize is not None or categorical_levels is not None,
+        )
         if text_columns:
             # Embed free-text columns client-side into numeric SVD features, then
             # send the widened numeric matrix through the normal request path
@@ -1189,14 +1492,46 @@ class SynthefyNoriClient:
             X_train, y_train, X_test, task,
             max_categorical_cardinality=max_categorical_cardinality,
             categorical_encoding=categorical_encoding,
+            output_type=output_type,
+            quantile_levels=quantile_levels,
         )
         request.memory_policy = memory_policy
         # Cleared per call so a stale report from an earlier prediction can never be read
         # as belonging to this one.
         self.last_memory_report = None
+
+        # Distribution output is shaped separately: it is not one value per query
+        # row, so it does not flow through the point-prediction path below.
+        if output_type in _DISTRIBUTION_OUTPUT_TYPES:
+            q_by_row, taus, mean = (
+                self._predict_local_distribution(
+                    request, output_type=output_type, quantile_levels=quantile_levels
+                )
+                if self.mode == "local"
+                else self._predict_remote_distribution(
+                    request,
+                    output_type=output_type,
+                    timeout=timeout,
+                    extra_headers=extra_headers,
+                )
+            )
+            if output_type == "quantiles":
+                return _shape_quantiles(
+                    q_by_row,
+                    quantile_levels or [],
+                    as_pandas=as_pandas,
+                    X_test=X_test,
+                    y_train=y_train,
+                )
+            return _shape_full(
+                q_by_row, taus, mean,
+                as_pandas=as_pandas, X_test=X_test, y_train=y_train,
+            )
+
         if self.mode == "local":
             predictions = self._predict_local(
                 request,
+                output_type=output_type,
                 discretize=discretize,
                 categorical_levels=categorical_levels,
             )
@@ -1207,7 +1542,10 @@ class SynthefyNoriClient:
                     request.y_train, discretize, categorical_levels
                 )
             predictions = self._predict_remote(
-                request, timeout=timeout, extra_headers=extra_headers
+                request,
+                output_type=output_type,
+                timeout=timeout,
+                extra_headers=extra_headers,
             )
             if remote_levels is not None:
                 predictions = _snap_to_levels(predictions, remote_levels)
@@ -1224,13 +1562,103 @@ class SynthefyNoriClient:
     # Local mode
     # ------------------------------------------------------------------ #
 
+    def _local_regressor_predict(
+        self,
+        request: NoriPredictRequest,
+        *,
+        output_type: str,
+        quantile_levels: Optional[List[float]],
+    ) -> Any:
+        """Run local inference through :class:`NoriRegressor` for a non-default ``output_type``.
+
+        The functional ``synthefy_nori.predict`` cannot express ``output_type``
+        (it forwards ``**kwargs`` to the constructor), so anything other than
+        ``output_type="mean"`` fits/predicts the estimator directly. Returns
+        whatever ``NoriRegressor.predict`` returns for that ``output_type``: a
+        point array, a ``(n_levels, n_query)`` quantile array, or the ``"full"``
+        dict.
+        """
+        regressor_cls = _load_local_regressor()
+        import inspect
+
+        if "output_type" not in inspect.signature(regressor_cls.predict).parameters:
+            raise ImportError(
+                f"output_type={output_type!r} requires a newer synthefy-nori (with "
+                "output_type= on NoriRegressor.predict, added in 0.6.0). Upgrade "
+                'with: pip install -U "synthefy[local]".'
+            )
+        init_kwargs: Dict[str, Any] = {}
+        if self._local_variant is not None:
+            # Same upgrade guard as the functional path: the variant selector is a
+            # constructor argument here, so check it before an opaque TypeError.
+            if "model" not in inspect.signature(regressor_cls).parameters:
+                raise ImportError(
+                    f"Local Nori variant {self._local_variant!r} requires a newer "
+                    "synthefy-nori (with the model= selector). Upgrade with: "
+                    'pip install -U "synthefy[local]".'
+                )
+            init_kwargs["model"] = self._local_variant
+        regressor = regressor_cls(**init_kwargs)
+        regressor.fit(request.X_train, request.y_train)
+        return regressor.predict(
+            request.X_test, output_type=output_type, quantiles=quantile_levels
+        )
+
+    def _predict_local_distribution(
+        self,
+        request: NoriPredictRequest,
+        *,
+        output_type: str,
+        quantile_levels: Optional[List[float]],
+    ) -> Tuple["np.ndarray", "np.ndarray", "np.ndarray"]:
+        """Local distribution output, normalized to ``(quantiles_by_row, taus, mean)``.
+
+        ``NoriRegressor`` returns ``output_type="quantiles"`` level-major
+        (``(n_levels, n_query)``) but ``"full"`` row-major; both are normalized to
+        row-major here so one shaping path serves local and remote alike.
+        """
+        result = self._local_regressor_predict(
+            request, output_type=output_type, quantile_levels=quantile_levels
+        )
+        n_query = len(request.X_test)
+        if output_type == "quantiles":
+            levels = quantile_levels or []
+            by_level = np.asarray(result, dtype=float)  # (n_levels, n_query)
+            if by_level.shape != (len(levels), n_query):
+                raise ValueError(
+                    "synthefy-nori returned a quantile array of shape "
+                    f"{by_level.shape}, expected {(len(levels), n_query)}."
+                )
+            # taus/mean belong to output_type="full" only; an empty array keeps the
+            # tuple shape without a second forward pass.
+            empty = np.asarray([], dtype=float)
+            return by_level.T, empty, empty
+        q_by_row = np.asarray(result["quantiles"], dtype=float)
+        taus = np.asarray(result["taus"], dtype=float)
+        if q_by_row.shape != (n_query, taus.shape[0]):
+            raise ValueError(
+                "synthefy-nori returned a quantile bank of shape "
+                f"{q_by_row.shape}, expected {(n_query, taus.shape[0])}."
+            )
+        return q_by_row, taus, np.asarray(result["mean"], dtype=float)
+
     def _predict_local(
         self,
         request: NoriPredictRequest,
         *,
+        output_type: str = DEFAULT_OUTPUT_TYPE,
         discretize: Optional[str] = None,
         categorical_levels: Optional[VectorLike] = None,
     ) -> List[float]:
+        if output_type != DEFAULT_OUTPUT_TYPE:
+            # "median"/"mode" are point outputs but still need the estimator API
+            # (see _local_regressor_predict). Discretization cannot reach here:
+            # _validate_output_type rejects that combination up front.
+            return _as_float_list(
+                self._local_regressor_predict(
+                    request, output_type=output_type, quantile_levels=None
+                )
+            )
         local_predict = _load_local_predict()
         extra: Dict[str, Any] = {}
         if discretize is not None or categorical_levels is not None:
@@ -1283,20 +1711,28 @@ class SynthefyNoriClient:
     # Remote mode
     # ------------------------------------------------------------------ #
 
-    def _predict_remote(
+    def _post_predict(
         self,
         request: NoriPredictRequest,
         *,
+        output_type: str,
         timeout: Optional[float],
         extra_headers: Optional[Dict[str, str]],
-    ) -> List[float]:
+    ) -> NoriPredictResponse:
+        """POST one prediction request and parse the response.
+
+        Enforces the capability handshakes for both explicitly requested
+        distribution output and a serving-memory policy.
+        """
         # Serialise the policy with exclude_unset so only the fields the caller actually set
         # go on the wire. This is what lets the field be a typed MemoryPolicy without the
         # CLIENT pinning the SERVER's defaults: a full dump would send all twelve fields, and a
         # later change to a default server-side would then be silently overridden by every
         # older client. A request that sets no policy omits the key entirely rather than
         # sending null -- the hosted schema declares a preset name or an object, never null.
-        payload = request.model_dump(exclude={"memory_policy"})
+        # The distribution fields are likewise omitted when unset so the default request stays
+        # byte-for-byte compatible with deployments that predate them.
+        payload = request.model_dump(exclude={"memory_policy"}, exclude_none=True)
         if request.memory_policy is not None:
             payload["memory_policy"] = (
                 request.memory_policy
@@ -1329,7 +1765,83 @@ class SynthefyNoriClient:
             # Validated through MemoryReport, exposed as a dict: the library's own
             # memory_report_ is a dict, and `report["rung"]` is how it is read.
             self.last_memory_report = parsed.memory_report.model_dump()
+        if output_type != DEFAULT_OUTPUT_TYPE and parsed.output_type != output_type:
+            honored = (
+                "omitted the output_type field entirely, so it predates "
+                "distribution output"
+                if parsed.output_type is None
+                else f"honored output_type={parsed.output_type!r} instead"
+            )
+            raise ValueError(
+                f"The hosted deployment did not serve output_type={output_type!r}: "
+                f"it {honored}. Such a deployment answers with the distribution "
+                f"mean, which is indistinguishable from a real {output_type!r} "
+                "result, so this is raised rather than returning means as if they "
+                'were what you asked for. Use local mode (pip install '
+                '"synthefy[local]", then mode="local"), or point '
+                "base_url/endpoint at a deployment that serves distribution output."
+            )
+        return parsed
+
+    def _predict_remote(
+        self,
+        request: NoriPredictRequest,
+        *,
+        output_type: str = DEFAULT_OUTPUT_TYPE,
+        timeout: Optional[float],
+        extra_headers: Optional[Dict[str, str]],
+    ) -> List[float]:
+        parsed = self._post_predict(
+            request,
+            output_type=output_type,
+            timeout=timeout,
+            extra_headers=extra_headers,
+        )
         return parsed.predictions
+
+    def _predict_remote_distribution(
+        self,
+        request: NoriPredictRequest,
+        *,
+        output_type: str,
+        timeout: Optional[float],
+        extra_headers: Optional[Dict[str, str]],
+    ) -> Tuple["np.ndarray", "np.ndarray", "np.ndarray"]:
+        """Remote distribution output, normalized to ``(quantiles_by_row, taus, mean)``.
+
+        The wire carries the quantile block row-major — ``(n_query, K)``, the
+        natural JSON shape and the one ``output_type="full"`` uses — so no
+        transpose is needed here; ``_shape_quantiles`` handles the level-major
+        flip for ``output_type="quantiles"``.
+        """
+        parsed = self._post_predict(
+            request,
+            output_type=output_type,
+            timeout=timeout,
+            extra_headers=extra_headers,
+        )
+        if parsed.quantiles is None or parsed.taus is None:
+            raise ValueError(
+                f"The hosted deployment echoed output_type={output_type!r} but "
+                "returned no quantile block; it cannot serve distribution output. "
+                'Use local mode (pip install "synthefy[local]", then mode="local").'
+            )
+        q_by_row = _nullable_rows_to_array(parsed.quantiles)
+        taus = np.asarray(parsed.taus, dtype=float)
+        n_query = len(request.X_test)
+        expected = (n_query, taus.shape[0])
+        if q_by_row.shape != expected:
+            raise ValueError(
+                "The server returned a quantile block of shape "
+                f"{q_by_row.shape}, expected {expected} "
+                "(one row per X_test row, one column per tau level)."
+            )
+        if request.quantiles is not None and taus.shape[0] != len(request.quantiles):
+            raise ValueError(
+                f"Requested {len(request.quantiles)} quantile level(s) but the "
+                f"server returned {taus.shape[0]}."
+            )
+        return q_by_row, taus, np.asarray(parsed.predictions, dtype=float)
 
     def _headers(
         self, *, extra_headers: Optional[Dict[str, str]] = None

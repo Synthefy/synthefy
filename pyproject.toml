@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "synthefy"
-version = "6.1.0"
+version = "6.2.0"
 description = "Python client for the Synthefy API: time-series forecasting and Nori in-context tabular regression"
 readme = "README.md"
 license = {text = "MIT"}
@@ -74,5 +74,4 @@ dev = [
     "pytest>=8.3.2",
     "pytest-asyncio>=0.25.0",
 ]
-
 
