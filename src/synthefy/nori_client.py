@@ -42,6 +42,10 @@ from synthefy.api_client import (
 GATEWAY_BASE_URL = "https://inference.baseten.co"
 GATEWAY_ENDPOINT = "/predict"
 
+# Environment variable holding the hosted-Nori API key. Matches SYNTHEFY_API_KEY
+# used by SynthefyAPIClient, so the whole package reads one naming scheme.
+NORI_API_KEY_ENV = "SYNTHEFY_NORI_API_KEY"
+
 # Sentinel for a required ``model=`` (there is no default -- every caller names a size). Kept
 # distinct from ``None``, which is a valid, meaningful value: a dedicated deployment endpoint that
 # omits "model" from the request body.
@@ -776,9 +780,9 @@ class SynthefyNoriClient:
     The ``mode`` argument selects how predictions run:
 
     - ``"remote"`` (default): call the hosted Baseten endpoint over HTTPS.
-      Requires a Baseten API key (``api_key`` argument or ``BASETEN_API_KEY``
-      environment variable), sent as ``Authorization: <auth_scheme> <key>``
-      (``Bearer`` by default).
+      Requires an API key (``api_key`` argument or the
+      ``SYNTHEFY_NORI_API_KEY`` environment variable), sent as
+      ``Authorization: <auth_scheme> <key>`` (``Bearer`` by default).
     - ``"local"``: run in-process via the optional ``synthefy-nori`` package
       (``pip install "synthefy[local]"``). No network and no API key.
     - ``"auto"``: use ``"local"`` if ``synthefy-nori`` is installed, otherwise
@@ -796,9 +800,10 @@ class SynthefyNoriClient:
     Parameters
     ----------
     api_key : str or None, optional
-        Baseten API key (remote mode only). If ``None``, falls back to the
-        ``BASETEN_API_KEY`` environment variable. A :class:`ValueError` is raised
-        if neither is set when remote mode is in effect.
+        API key for hosted Nori (remote mode only). If ``None``, falls back to
+        the ``SYNTHEFY_NORI_API_KEY`` environment variable. A
+        :class:`ValueError` is raised if neither is set when remote mode is in
+        effect.
     mode : {"remote", "local", "auto"}, default "remote"
         How predictions run. See above.
     timeout : float, default 300.0
@@ -841,7 +846,7 @@ class SynthefyNoriClient:
     Examples
     --------
     >>> from synthefy import SynthefyNoriClient
-    >>> client = SynthefyNoriClient(api_key="...", model="nori-30m")  # or BASETEN_API_KEY
+    >>> client = SynthefyNoriClient(api_key="...", model="nori-30m")  # or SYNTHEFY_NORI_API_KEY
     >>> preds = client.predict(
     ...     X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
     ...     y_train=[1.0, 1.0, 2.0],
@@ -918,12 +923,12 @@ class SynthefyNoriClient:
 
         if mode == "remote":
             if api_key is None:
-                api_key = os.getenv("BASETEN_API_KEY")
+                api_key = os.getenv(NORI_API_KEY_ENV)
             if not api_key:
                 raise ValueError(
-                    "A Baseten API key must be provided either as the `api_key` "
-                    "argument or through the BASETEN_API_KEY environment variable "
-                    "when mode='remote'"
+                    "A Synthefy Nori API key must be provided either as the "
+                    f"`api_key` argument or through the {NORI_API_KEY_ENV} "
+                    "environment variable when mode='remote'"
                 )
             self.api_key: Optional[str] = api_key
             self.client: Optional[httpx.Client] = httpx.Client(
