@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.0.0]
+
+### Removed (breaking)
+
+- **`DEDICATED_BASE_URL` and `DEDICATED_ENDPOINT` are gone.** `from synthefy.nori_client import
+  DEDICATED_BASE_URL, DEDICATED_ENDPOINT` now raises `ImportError`. Nori is addressed by gateway
+  slug: `SynthefyNoriClient(api_key=..., model="nori-6m")` sends `{"model": "synthefy/nori-6m"}`
+  to `https://inference.baseten.co/predict`, and the gateway resolves the slug to a deployment.
+
+  A hardcoded `model-<id>.api.baseten.co` host cannot stay correct. Each Nori variant is its own
+  Baseten model with its own id, so one constant can address at most one of them, and an id does
+  not survive a model being deleted and re-created. The gateway slug is stable across both.
+
+  The gateway is also the only path Synthefy meters, rate-limits and grants per key, so it is the
+  one supported way to reach hosted Nori.
+
+### Migration
+
+```python
+# before
+from synthefy.nori_client import DEDICATED_BASE_URL, DEDICATED_ENDPOINT
+client = SynthefyNoriClient(
+    api_key=key, base_url=DEDICATED_BASE_URL, endpoint=DEDICATED_ENDPOINT,
+    model=None, auth_scheme="Api-Key",
+)
+
+# after
+client = SynthefyNoriClient(api_key=key, model="nori-6m")
+```
+
+`base_url`, `endpoint`, `auth_scheme` and `model=None` all still exist as generic overrides for
+pointing the client at a host of your own. Only the two Synthefy-specific constants are removed.
+
 ## [5.0.0]
 
 ### Changed (breaking)

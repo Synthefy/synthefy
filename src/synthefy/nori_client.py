@@ -47,8 +47,8 @@ GATEWAY_ENDPOINT = "/predict"
 NORI_API_KEY_ENV = "SYNTHEFY_NORI_API_KEY"
 
 # Sentinel for a required ``model=`` (there is no default -- every caller names a size). Kept
-# distinct from ``None``, which is a valid, meaningful value: a dedicated deployment endpoint that
-# omits "model" from the request body.
+# distinct from ``None``, which is a valid, meaningful value: omit "model" from the request body
+# entirely, for a caller-supplied ``base_url`` that routes by URL rather than by slug.
 _MODEL_REQUIRED: Any = object()
 
 # Model registry. Maps a ``model=`` selector -> ``(remote_gateway_slug, local_variant)``:
@@ -134,18 +134,14 @@ def _resolve_local_variant(model: Optional[str]) -> Optional[str]:
     )
 
 
-# Dedicated endpoint: a specific production deployment; body carries no "model".
-# To target it, pass base_url/endpoint to the constructor and set model=None.
-DEDICATED_BASE_URL = "https://model-3m5j7y9w.api.baseten.co"
-DEDICATED_ENDPOINT = "/environments/production/predict"
-
 DEFAULT_TASK = "regression"
 
 Mode = Literal["remote", "local", "auto"]
 _VALID_MODES = ("remote", "local", "auto")
 
-# Authorization header scheme for remote requests. The Baseten inference
-# *gateway* accepts only ``Bearer``; dedicated deployments use ``Api-Key``.
+# Authorization header scheme for remote requests. The Baseten inference *gateway* accepts only
+# ``Bearer``, which is why it is the default. ``Api-Key`` exists for a caller who points
+# ``base_url`` at some other Baseten host that expects that scheme.
 AuthScheme = Literal["Bearer", "Api-Key"]
 _VALID_AUTH_SCHEMES = ("Bearer", "Api-Key")
 DEFAULT_AUTH_SCHEME: AuthScheme = "Bearer"
@@ -788,14 +784,13 @@ class SynthefyNoriClient:
     - ``"auto"``: use ``"local"`` if ``synthefy-nori`` is installed, otherwise
       fall back to ``"remote"`` (which then requires an API key).
 
-    For remote mode, the client targets the Baseten inference *gateway* by default
+    For remote mode, the client targets the Baseten inference *gateway*
     (``https://inference.baseten.co/predict``) and includes the chosen size slug (e.g.
-    ``"model": "synthefy/nori-30m"``) in the request body. The gateway authenticates
-    with the ``Bearer`` scheme (the default ``auth_scheme``). To target a
-    dedicated deployment instead, pass ``base_url=DEDICATED_BASE_URL``,
-    ``endpoint=DEDICATED_ENDPOINT``, ``model=None`` and ``auth_scheme="Api-Key"``
-    (the dedicated endpoint takes the body verbatim with no ``model`` field and
-    authenticates with the ``Api-Key`` scheme).
+    ``"model": "synthefy/nori-30m"``) in the request body. The gateway resolves that slug
+    to a deployment and authenticates with the ``Bearer`` scheme (the default
+    ``auth_scheme``). ``base_url``, ``endpoint``, ``model=None`` and ``auth_scheme`` are
+    available for pointing the client at some other host, but the gateway is the supported
+    path and the only one Synthefy meters and rate-limits.
 
     Parameters
     ----------
@@ -820,7 +815,8 @@ class SynthefyNoriClient:
         size selector — ``"nori-6m"`` (the ~6M base) or ``"nori-30m"`` (the ~29.2M variant) —
         which selects both the remote gateway deployment and, in local mode, the checkpoint. A
         raw gateway slug (e.g. ``"synthefy/nori-30m"``) is also accepted verbatim, and ``None``
-        targets a dedicated deployment (no ``model`` field in the body). Omitting ``model``
+        omits the ``model`` field from the body entirely (only useful with a caller-supplied
+        ``base_url`` that routes by URL). Omitting ``model``
         entirely raises :class:`ValueError`. Selecting a variant in local mode requires a
         synthefy-nori build with the ``model=`` selector.
         Nori Thinking — the friendly names ``"nori-30m-thinking"`` / ``"nori-30m-thinking-medium"``
@@ -832,8 +828,8 @@ class SynthefyNoriClient:
         the base model.
     auth_scheme : {"Bearer", "Api-Key"}, default "Bearer"
         HTTP ``Authorization`` scheme prefixed to the API key (remote mode). The
-        inference gateway requires ``"Bearer"``; dedicated deployments use
-        ``"Api-Key"``.
+        inference gateway requires ``"Bearer"``; ``"Api-Key"`` is only for a
+        caller-supplied ``base_url`` pointing at a host that expects that scheme.
     user_agent : str or None, optional
         Custom ``User-Agent`` header (remote mode).
 
