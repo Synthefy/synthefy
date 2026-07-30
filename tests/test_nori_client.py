@@ -1622,8 +1622,9 @@ def test_out_of_range_values_are_caught_locally():
 
 
 @pytest.mark.skipif(
-    importlib.util.find_spec("synthefy_nori") is None,
-    reason="needs synthefy-nori installed to compare against the real model",
+    importlib.util.find_spec("synthefy_nori") is None
+    or importlib.util.find_spec("synthefy_nori.inference.memory_policy") is None,
+    reason="needs synthefy-nori >= 0.13.0, which is the version that has MemoryPolicy",
 )
 def test_the_real_memory_policy_round_trips_through_the_client():
     """Drift guard: the actual model must survive the client's normalisation.

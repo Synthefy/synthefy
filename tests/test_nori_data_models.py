@@ -23,10 +23,21 @@ from synthefy.nori_data_models import MEMORY_PRESETS, MEMORY_RUNGS, MemoryPolicy
 
 
 def _library_available() -> bool:
-    # find_spec on a dotted name imports the parent, so check the top level first.
+    """Is a synthefy-nori that actually HAS MemoryPolicy importable?
+
+    Probe the leaf module, not ``synthefy_nori.inference`` -- that package exists in every
+    version back to 0.10, so probing it reports "available" against a published 0.12 (which is
+    what the `local`/`text` extras install in CI) and these tests then fail on an import of a
+    module that does not exist yet. The client's own capability check
+    (``_local_memory_policy_available``) already probes the leaf; this file did not, and CI
+    caught it.
+
+    Two steps because find_spec on a dotted name imports the parent, which raises rather than
+    returning None when the top-level package is absent.
+    """
     if importlib.util.find_spec("synthefy_nori") is None:
         return False
-    return importlib.util.find_spec("synthefy_nori.inference") is not None
+    return importlib.util.find_spec("synthefy_nori.inference.memory_policy") is not None
 
 
 requires_library = pytest.mark.skipif(
