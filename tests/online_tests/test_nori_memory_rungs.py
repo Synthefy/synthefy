@@ -91,7 +91,7 @@ def table():
 @pytest.fixture(scope="module")
 def baseline(client, table):
     """The exact-rung predictions every other case is compared against."""
-    predictions = client.predict(*table, memory_policy=rungs.BASELINE.memory)
+    predictions = client.predict(*table, memory_policy=rungs.BASELINE.memory_policy)
     report = client.last_memory_report
     assert report is not None, "the deployment ignored memory_policy= (it predates the field)"
     assert report["query_chunk"] < rungs.N_QUERY, (
@@ -104,7 +104,7 @@ def baseline(client, table):
 class TestRungsThroughTheClient:
     @pytest.mark.parametrize("case", rungs.CASES, ids=lambda c: c.label)
     def test_the_rung_the_case_asks_for_is_what_runs(self, client, table, baseline, case):
-        predictions = client.predict(*table, memory_policy=case.memory)
+        predictions = client.predict(*table, memory_policy=case.memory_policy)
         report = client.last_memory_report
 
         assert report is not None, "no memory_report came back"
@@ -131,12 +131,30 @@ class TestPolicyPlumbing:
         client.predict(*table[:2], table[2][:8])
         assert client.last_memory_report is None
 
-    def test_an_incoherent_policy_is_rejected_before_any_inference(self, client, table):
-        # Validation lives in the library and runs server-side before the forward pass, so this
-        # should come back fast and carry the library's own message.
-        with pytest.raises(BadRequestError) as excinfo:
+    def test_an_unknown_field_never_reaches_the_network(self, client, table):
+        """Caught by the client's own MemoryPolicy, so it costs no request.
+
+        Was a server 400 before the client shipped the typed model. Asserting the local error
+        here is the point: a typo should not cost a round trip.
+        """
+        with pytest.raises(ValueError) as excinfo:   # pydantic ValidationError
             client.predict(*table[:2], table[2][:8], memory_policy={"int8": True})
+        assert not isinstance(excinfo.value, BadRequestError), (
+            "an unknown field reached the server; the client's model should have caught it"
+        )
         assert "int8" in str(excinfo.value)
+
+    def test_an_incoherent_combination_is_rejected_by_the_server(self, client, table):
+        """The rules the client deliberately does NOT copy still come back with its message.
+
+        Field-level mistakes are local; which COMBINATIONS are incoherent is server-side, and
+        duplicating that behaviour would drift in a way a schema comparison cannot see. Verified
+        against a real deployment because this is the half that only the server knows.
+        """
+        with pytest.raises(BadRequestError) as excinfo:
+            client.predict(*table[:2], table[2][:8],
+                           memory_policy={"cache": False, "cache_dtype": "int8"})
+        assert "cannot be combined" in str(excinfo.value)
 
     def test_a_forbidden_subsample_is_a_400_not_a_500(self, client, table):
         """Regression test for a caller-triggerable 500 (synthefy-nori-internal#300)."""
