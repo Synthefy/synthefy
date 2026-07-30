@@ -443,9 +443,9 @@ preds = client.predict(X_train, y_train, X_test, memory_policy="max_context")  #
 # ...individual fields...
 preds = client.predict(X_train, y_train, X_test, memory_policy={"cache_dtype": "int8"})
 
-# ...or the library's own pydantic model, if you have synthefy-nori installed. Same schema,
-# so you get validation at construction and IDE completion, with nothing duplicated here.
-from synthefy_nori import MemoryPolicy
+# ...or the typed model, which ships with the client — no synthefy-nori needed. Validated
+# before the request goes out, so a typo or an out-of-range value costs no round trip.
+from synthefy import MemoryPolicy
 preds = client.predict(X_train, y_train, X_test,
                        memory_policy=MemoryPolicy(cache_dtype="int8", gpu_budget_frac=0.5))
 

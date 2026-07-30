@@ -31,8 +31,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the report lives on that estimator. Use `NoriRegressor` and read `memory_report_` directly if
   you need it locally.
 
-- **`memory` / `memory_report` on `NoriPredictRequest` / `NoriPredictResponse`**, mirroring the
-  hosted contract.
+- **`MemoryPolicy` and `MemoryReport` pydantic models** (`synthefy.nori_data_models`), exported
+  from `synthefy`. `NoriPredictRequest.memory_policy` is typed `str | MemoryPolicy`, so a plain
+  dict is **validated before any request is sent** — an unknown field, a bad type or an
+  out-of-range value is caught locally instead of costing a round trip. Which *combinations* are
+  incoherent stays server-side, deliberately: duplicating that behaviour would drift in a way a
+  schema comparison cannot detect.
+
+  Only the fields you actually set go on the wire (`exclude_unset`), so the client never pins the
+  server's defaults — a later change to a default reaches existing clients rather than being
+  silently overridden by them.
+
+  The models are a copy of the library's, policed by 20 parity tests today and by the cross-repo
+  sync check specced in SynthefyPFN#119.
+
+- **`memory_report` on `NoriPredictResponse`**, mirroring the hosted contract.
 
 - **`memory_policy=` also accepts a `MemoryPolicy` instance** — the pydantic model from `synthefy-nori`,
   which *is* the schema. This client does not redeclare the policy's fields, so there is nothing
