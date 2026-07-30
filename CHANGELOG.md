@@ -5,6 +5,46 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.1.0]
+
+### Added
+
+- **`memory=` on `predict()` — the serving-memory policy, at parity with the local package.**
+  Either a preset name (`"exact"`, `"max_context"`, `"off"`) or an object of fields, e.g.
+  `{"cache_dtype": "int8"}`. Nori does in-context regression, so your table is *input*: one
+  prediction keeps a per-layer key/value cache over every context row, and that cache — not
+  the ~6M-parameter model — is what exhausts GPU memory on a big table. This decides what to
+  do about it. Omit it for defaults that suit almost every request.
+
+  Works in **both** modes. Remote, the policy is validated server-side and an incoherent one
+  is rejected before any inference is paid for. Local, it needs `synthefy-nori >= 0.13.0` and
+  raises `ImportError` with an upgrade hint on older builds.
+
+- **`SynthefyNoriClient.last_memory_report`** — what the server actually did about the policy
+  on the most recent `predict`: which fallback rung ran, the estimated and resident cache
+  sizes, the query chunk, any dropped context rows, plus any fields the server clamped and
+  coherence notes about the policy you sent. Worth reading, because the rung is decided by the
+  replica's free VRAM rather than by your request, so it is not knowable client-side.
+
+  Remote mode only. In local mode the policy is honoured but no report exists: the client goes
+  through `synthefy_nori.predict`, which builds an estimator internally and discards it, and
+  the report lives on that estimator. Use `NoriRegressor` and read `memory_report_` directly if
+  you need it locally.
+
+- **`memory` / `memory_report` on `NoriPredictRequest` / `NoriPredictResponse`**, mirroring the
+  hosted contract.
+
+### Changed
+
+- A `predict()` call that sets `memory=` and gets **no** `memory_report` back now raises
+  `ValueError`. A deployment predating the field ignores it and returns default-memory
+  predictions that are numerically valid, so nothing in `predictions` reveals the policy was
+  dropped — the server echoes the report precisely so this is detectable, and believing a
+  policy took effect when it did not is worse than an error.
+
+- A request that does **not** set `memory=` is byte-for-byte what it was before: the field is
+  omitted from the payload entirely rather than sent as `null`.
+
 ## [6.0.0]
 
 ### Removed (breaking)

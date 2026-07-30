@@ -10,7 +10,7 @@ import json
 import math
 import warnings
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Optional, Callable, Dict, List
 
 import httpx
 import numpy as np
@@ -913,6 +913,10 @@ def test_request_model_roundtrip():
         "y_train": [3.0],
         "X_test": [[4.0, 5.0]],
         "task": "regression",
+        # Optional serving-memory policy. None by default, and _predict_remote excludes it
+        # from the payload when unset, so an existing caller's request is unchanged on the
+        # wire -- see test_a_request_without_memory_does_not_send_the_field.
+        "memory": None,
     }
 
 
@@ -1351,3 +1355,167 @@ def test_text_columns_requires_dataframe():
     _attach_mock(client, _ok_handler([1.0], {}))
     with pytest.raises(ValueError):
         client.predict([[1.0, 2.0]], [1.0], [[1.0, 2.0]], text_columns=["review"])
+
+
+# ------------------------------------------------------------------ memory policy
+# `memory=` is the serving-memory policy, at parity with the local package. The wire half is
+# what these cover: that it reaches the request only when asked for, that what the server
+# reports comes back to the caller, and that a deployment which IGNORES it is treated as a
+# failure rather than as success.
+def _memory_handler(capture: Dict, report: Optional[Dict] = None) -> Handler:
+    """Mock endpoint that echoes a memory_report, as a supporting deployment does."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        capture["body"] = json.loads(request.content)
+        body: Dict[str, object] = {"task": "regression", "predictions": [1.0, 2.0]}
+        if report is not None:
+            body["memory_report"] = report
+        return httpx.Response(200, json=body)
+
+    return handler
+
+
+_REPORT = {
+    "rung": "resident_int8",
+    "est_cache_gb": 0.0122,
+    "resident_gb": 0.0065,
+    "query_chunk": 256,
+    "dropped_context_rows": 0,
+    "clamped": [],
+    "notes": [],
+}
+
+_X_TRAIN = [[0.0, 1.0], [1.0, 0.0], [0.5, 0.5]]
+_Y_TRAIN = [0.0, 1.0, 0.5]
+_X_TEST = [[0.2, 0.8], [0.9, 0.1]]
+
+
+def _client_with(handler: Handler) -> SynthefyNoriClient:
+    client = SynthefyNoriClient(api_key="k", model="nori-30m", mode="remote")
+    _attach_mock(client, handler)
+    return client
+
+
+def test_a_request_without_memory_does_not_send_the_field():
+    """The default request must stay byte-for-byte what it was before this feature.
+
+    Not merely "memory is null": the hosted schema declares the field as a preset name or an
+    object and forbids unknown properties, so an explicit null is a different request.
+    """
+    capture: Dict = {}
+    client = _client_with(_memory_handler(capture))
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST)
+    assert "memory" not in capture["body"]
+    assert set(capture["body"]) == {"X_train", "y_train", "X_test", "task", "model"}
+    assert client.last_memory_report is None
+
+
+@pytest.mark.parametrize(
+    "policy",
+    ["exact", "max_context", "off", {"cache_dtype": "int8"}, {"elements_budget": 4000}],
+    ids=["exact", "max_context", "off", "dict", "elements_budget"],
+)
+def test_a_policy_is_sent_verbatim(policy):
+    capture: Dict = {}
+    client = _client_with(_memory_handler(capture, _REPORT))
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory=policy)
+    assert capture["body"]["memory"] == policy
+
+
+def test_the_servers_report_reaches_the_caller():
+    """The rung depends on the replica's free VRAM, so the response is the only source."""
+    client = _client_with(_memory_handler({}, _REPORT))
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory={"cache_dtype": "int8"})
+    assert client.last_memory_report == _REPORT
+    assert client.last_memory_report["rung"] == "resident_int8"
+
+
+def test_a_deployment_that_ignores_the_policy_is_an_error_not_a_success():
+    """The capability handshake, and the reason the server echoes at all.
+
+    A deployment predating `memory` drops the field and returns default-memory predictions
+    that are numerically valid — nothing in `predictions` reveals the policy was ignored. So
+    a missing report has to be surfaced, or the caller believes something took effect that
+    did not.
+    """
+    client = _client_with(_memory_handler({}))  # no memory_report in the response
+    with pytest.raises(ValueError, match="did not report back"):
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory="exact")
+
+
+def test_the_report_is_cleared_between_calls():
+    """A stale report must not be readable as belonging to the call that just ran."""
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="k", model="nori-30m", mode="remote")
+    _attach_mock(client, _memory_handler(capture, _REPORT))
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory="exact")
+    assert client.last_memory_report is not None
+
+    _attach_mock(client, _memory_handler(capture))  # a call that sets no policy
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST)
+    assert client.last_memory_report is None, "the previous call's report leaked"
+
+
+def test_the_server_rejection_message_is_surfaced_unchanged():
+    """Validation lives in the library; the client must not paraphrase its message."""
+    detail = ("Invalid 'memory': 1 validation error for MemoryPolicy\nint8\n  "
+              "Extra inputs are not permitted")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"detail": detail}})
+
+    client = _client_with(handler)
+    with pytest.raises(BadRequestError) as excinfo:
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory={"int8": True})
+    assert "int8" in str(excinfo.value)
+
+
+def test_the_request_model_accepts_both_shapes():
+    from synthefy import NoriPredictRequest
+
+    assert NoriPredictRequest(
+        X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST, memory="exact"
+    ).memory == "exact"
+    assert NoriPredictRequest(
+        X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST,
+        memory={"cache_dtype": "int8"},
+    ).memory == {"cache_dtype": "int8"}
+    # Unset by default, so the field cannot change an existing caller's payload.
+    assert NoriPredictRequest(
+        X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST
+    ).memory is None
+
+
+def test_local_mode_refuses_memory_on_an_old_synthefy_nori(monkeypatch):
+    """An opaque TypeError from deep inside the library is not an acceptable answer."""
+    from synthefy import nori_client as module
+
+    monkeypatch.setattr(module, "_local_memory_policy_available", lambda: False)
+    monkeypatch.setattr(module, "_local_available", lambda: True)
+    monkeypatch.setattr(module, "_load_local_predict", lambda: (lambda *a, **k: [0.0, 0.0]))
+    client = SynthefyNoriClient(model="nori-30m", mode="local")
+    with pytest.raises(ImportError, match="0.13.0"):
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory="exact")
+
+
+def test_local_mode_forwards_the_policy_when_supported(monkeypatch):
+    from synthefy import nori_client as module
+
+    seen: Dict = {}
+
+    def fake_predict(X_train, y_train, X_test, *, model=None, **kwargs):
+        # `model` is explicit because the client gates the local variant on
+        # signature(local_predict).parameters, exactly as synthefy_nori.predict declares it.
+        seen["model"] = model
+        seen.update(kwargs)
+        return [0.1, 0.2]
+
+    monkeypatch.setattr(module, "_local_memory_policy_available", lambda: True)
+    monkeypatch.setattr(module, "_local_available", lambda: True)
+    monkeypatch.setattr(module, "_load_local_predict", lambda: fake_predict)
+    client = SynthefyNoriClient(model="nori-30m", mode="local")
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory={"cache_dtype": "int8"})
+    assert seen["memory"] == {"cache_dtype": "int8"}
+    # Documented asymmetry: the functional local path discards the estimator that holds the
+    # report, so there is nothing to surface.
+    assert client.last_memory_report is None
