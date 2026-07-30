@@ -363,24 +363,10 @@ preds = client.predict(X_train, y_train, X_test, as_pandas=True)
 # preds is a pd.Series named after y_train, sharing X_test's index
 ```
 
-By default the client targets the Baseten inference **gateway**
+The client targets the Baseten inference **gateway**
 (`https://inference.baseten.co/predict`); `model=` is required and names a size —
-`"nori-30m"` (→ `synthefy/nori-30m`) or `"nori-6m"` (→ `synthefy/nori-6m`). To
-target a **dedicated** deployment instead, point `base_url`/`endpoint` at it and
-set `model=None` (the dedicated endpoint takes the body verbatim, with no `model`
-field):
-
-```python
-from synthefy.nori_client import DEDICATED_BASE_URL, DEDICATED_ENDPOINT
-
-client = SynthefyNoriClient(
-    api_key="your_api_key",
-    base_url=DEDICATED_BASE_URL,    # https://model-3m5j7y9w.api.baseten.co
-    endpoint=DEDICATED_ENDPOINT,    # /environments/production/predict
-    model=None,
-    auth_scheme="Api-Key",          # dedicated endpoints use Api-Key, not Bearer
-)
-```
+`"nori-30m"` (→ `synthefy/nori-30m`) or `"nori-6m"` (→ `synthefy/nori-6m`). The
+gateway resolves that slug to a deployment, so you never name a deployment yourself.
 
 `timeout` and `max_retries` are also configurable on the constructor.
 
@@ -391,9 +377,7 @@ client = SynthefyNoriClient(
   need a Baseten account.
 - Provide it via the `api_key` argument or the `SYNTHEFY_NORI_API_KEY`
   environment variable. It is sent as the header
-  `Authorization: <auth_scheme> <key>`. The
-  scheme defaults to `Bearer` (required by the gateway); pass
-  `auth_scheme="Api-Key"` for a dedicated deployment.
+  `Authorization: Bearer <key>`, which is what the gateway requires.
 
 #### Errors
 

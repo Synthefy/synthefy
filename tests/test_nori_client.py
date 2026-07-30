@@ -9,6 +9,7 @@ import builtins
 import json
 import math
 import warnings
+from pathlib import Path
 from typing import Callable, Dict, List
 
 import httpx
@@ -26,8 +27,6 @@ from synthefy.api_client import (
     InternalServerError,
 )
 from synthefy.nori_client import (
-    DEDICATED_BASE_URL,
-    DEDICATED_ENDPOINT,
     GATEWAY_ENDPOINT,
     NORI_VARIANTS,
     _is_thinking_model,
@@ -637,14 +636,15 @@ def test_nan_is_forwarded_to_the_server():
     assert math.isnan(sent[1][1])
 
 
-def test_dedicated_endpoint_config_omits_model_field():
+def test_model_none_omits_the_model_field():
+    # model=None is the escape for a caller-supplied base_url that routes by URL instead of by
+    # slug: the body then carries no "model" key at all.
     capture: Dict = {}
     client = SynthefyNoriClient(
         api_key="test-key",
-        base_url=DEDICATED_BASE_URL,
-        endpoint=DEDICATED_ENDPOINT,
+        base_url="https://example.invalid",
+        endpoint="/predict",
         model=None,
-        auth_scheme="Api-Key",
     )
     _attach_mock(client, _ok_handler([1.0], capture))
 
@@ -653,10 +653,27 @@ def test_dedicated_endpoint_config_omits_model_field():
     )
 
     assert preds == [1.0]
-    assert capture["path"] == DEDICATED_ENDPOINT
+    assert capture["path"] == "/predict"
     assert "model" not in capture["body"]
-    # Dedicated deployments authenticate with the Api-Key scheme.
-    assert capture["headers"]["authorization"] == "Api-Key test-key"
+
+
+def test_no_dedicated_url_constants_are_exported():
+    """The client addresses Nori only by gateway slug, never by a per-model host.
+
+    A hardcoded ``model-<id>.api.baseten.co`` constant cannot stay correct: each variant is
+    its own Baseten model with its own id, and an id does not survive a model being deleted
+    and re-created. Callers use ``model=`` and let the gateway resolve it.
+    """
+    import synthefy.nori_client as nc
+
+    for name in ("DEDICATED_BASE_URL", "DEDICATED_ENDPOINT"):
+        assert not hasattr(nc, name), f"{name} must not exist; address Nori by gateway slug"
+    # The gateway host is `inference.baseten.co`; a per-model host is `model-<id>.api.baseten.co`,
+    # so any `api.baseten.co` occurrence means an id-addressed host came back.
+    source = Path(nc.__file__).read_text()
+    assert "api.baseten.co" not in source, (
+        "a per-model Baseten host is hardcoded in nori_client.py; use the gateway slug"
+    )
 
 
 # --------------------------------------------------------------------------- #
