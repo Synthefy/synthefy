@@ -1427,8 +1427,9 @@ def test_the_servers_report_reaches_the_caller():
     """The rung depends on the replica's free VRAM, so the response is the only source."""
     client = _client_with(_memory_handler({}, _REPORT))
     client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy={"cache_dtype": "int8"})
-    assert client.last_memory_report == _REPORT
+    # Validated through MemoryReport, exposed as a dict (as the library does).
     assert client.last_memory_report["rung"] == "resident_int8"
+    assert client.last_memory_report["est_cache_gb"] == _REPORT["est_cache_gb"]
 
 
 def test_a_deployment_that_ignores_the_policy_is_an_error_not_a_success():

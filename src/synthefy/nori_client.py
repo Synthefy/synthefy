@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel
 
+from synthefy.nori_data_models import MemoryPolicy, MemoryReport
 from synthefy.api_client import (
     APIConnectionError,
     APITimeoutError,
@@ -201,7 +202,7 @@ class NoriPredictResponse(BaseModel):
 
     task: str
     predictions: List[float]
-    memory_report: Optional[Dict[str, Any]] = None
+    memory_report: Optional[MemoryReport] = None
 
 
 def _frame_columns(arr: Any) -> Optional[List[Any]]:
@@ -1339,7 +1340,9 @@ class SynthefyNoriClient:
                     "effect. The endpoint is most likely running a build from before "
                     "memory_policy= was supported. Omit memory_policy= to use the deployment's defaults."
                 )
-            self.last_memory_report = parsed.memory_report
+            # Validated through MemoryReport, exposed as a dict: the library's own
+            # memory_report_ is a dict, and `report["rung"]` is how it is read.
+            self.last_memory_report = parsed.memory_report.model_dump()
         return parsed.predictions
 
     def _headers(
