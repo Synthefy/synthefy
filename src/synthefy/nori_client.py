@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
-from synthefy.nori_data_models import MemoryPolicy, MemoryReport
+from synthefy.nori_data_models import MemoryPolicyInput, MemoryReport
 from synthefy.api_client import (
     APIConnectionError,
     APITimeoutError,
@@ -189,7 +189,7 @@ class NoriPredictRequest(BaseModel):
     y_train: List[float]
     X_test: List[List[float]]
     task: str = DEFAULT_TASK
-    memory_policy: Optional[Union[str, MemoryPolicy]] = None
+    memory_policy: Optional[MemoryPolicyInput] = None
 
 
 class NoriPredictResponse(BaseModel):
@@ -687,36 +687,6 @@ def _local_discretize_available() -> bool:
     return importlib.util.find_spec("synthefy_nori.discretize") is not None
 
 
-def _as_memory_policy_payload(
-    memory_policy: Optional[Union[str, Dict[str, Any], MemoryPolicy, Any]],
-) -> Optional[Union[str, Dict[str, Any], MemoryPolicy]]:
-    """Normalise the one policy shape pydantic cannot validate on its own.
-
-    ``NoriPredictRequest.memory_policy`` is typed ``str | MemoryPolicy``, so pydantic handles
-    almost everything: a preset name passes through, and a plain dict is validated INTO
-    :class:`~synthefy.nori_data_models.MemoryPolicy` — bounds, enums and unknown-field
-    rejection included, before any request is sent.
-
-    The exception is an instance of the *library's* ``MemoryPolicy``
-    (``synthefy_nori.inference.memory_policy``), which anyone with ``synthefy-nori`` installed
-    may reasonably pass. It is a different class, so pydantic rejects it rather than
-    re-validating. Dump it to a dict and let pydantic take it from there — duck-typed on
-    ``model_dump`` so this module keeps no dependency on the model package.
-
-    ``exclude_unset`` matters here for the same reason it does on the way out: carry only what
-    the caller actually set, so the server's defaults apply to the rest.
-    """
-    if memory_policy is None or isinstance(memory_policy, (str, dict, MemoryPolicy)):
-        return memory_policy
-    model_dump = getattr(memory_policy, "model_dump", None)
-    if callable(model_dump):
-        return model_dump(exclude_unset=True)
-    raise TypeError(
-        f"memory_policy must be a preset name, a dict, or a MemoryPolicy; got "
-        f"{type(memory_policy).__name__}"
-    )
-
-
 def _local_memory_policy_available() -> bool:
     """Return ``True`` if the installed ``synthefy-nori`` accepts ``memory_policy=``.
 
@@ -1040,7 +1010,7 @@ class SynthefyNoriClient:
         embedder: str = "minilm",
         discretize: Optional[str] = None,
         categorical_levels: Optional[VectorLike] = None,
-        memory_policy: Optional[Union[str, Dict[str, Any]]] = None,
+        memory_policy: Optional[MemoryPolicyInput] = None,
         timeout: Optional[float] = None,
         extra_headers: Optional[Dict[str, str]] = None,
     ) -> Union[List[float], pd.Series]:
@@ -1220,7 +1190,7 @@ class SynthefyNoriClient:
             max_categorical_cardinality=max_categorical_cardinality,
             categorical_encoding=categorical_encoding,
         )
-        request.memory_policy = _as_memory_policy_payload(memory_policy)
+        request.memory_policy = memory_policy
         # Cleared per call so a stale report from an earlier prediction can never be read
         # as belonging to this one.
         self.last_memory_report = None

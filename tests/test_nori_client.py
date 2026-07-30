@@ -1547,7 +1547,12 @@ def test_local_mode_forwards_the_policy_when_supported(monkeypatch):
 
 # --------------------------------- the model in synthefy-nori IS the schema
 class _FakePolicy:
-    """Duck-types MemoryPolicy: the client normalises on model_dump, not on the type.
+    """Stands in for ANOTHER package's MemoryPolicy — same name, different class.
+
+    pydantic refuses a foreign class outright, with a message that is misleading to someone
+    holding exactly what it says it wants, so the annotation carries a BeforeValidator that
+    dumps anything model_dump-shaped. Duck-typed here for the same reason it is there: so the
+    client needs no dependency on the model package.
 
     Duck-typed on purpose — importing the real model would make a thin API client depend on
     the model package (and its torch tree) just to name a shape.
@@ -1593,10 +1598,27 @@ def test_feeding_a_resolved_report_back_in_is_caught_locally():
                        memory_policy={"cache": True, "rung": "resident_bf16"})
 
 
-def test_a_nonsense_memory_type_is_rejected_locally():
+def test_a_nonsense_memory_policy_type_is_rejected_locally():
+    """One error type for every bad policy, from pydantic, before any request is sent."""
     client = _client_with(_memory_handler({}, _REPORT))
-    with pytest.raises(TypeError, match="preset name, a dict, or a MemoryPolicy"):
+    with pytest.raises(ValueError):   # pydantic ValidationError subclasses ValueError
         client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy=object())
+
+
+def test_an_unknown_preset_is_caught_locally():
+    """The preset is a Literal, not a bare str, so a typo never reaches the network.
+
+    It used to: the field accepted any string, so "aggressive" was sent and came back a 400.
+    """
+    client = _client_with(_memory_handler({}, _REPORT))
+    with pytest.raises(ValueError, match="aggressive"):
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy="aggressive")
+
+
+def test_out_of_range_values_are_caught_locally():
+    client = _client_with(_memory_handler({}, _REPORT))
+    with pytest.raises(ValueError):
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy={"gpu_budget_frac": 1.5})
 
 
 @pytest.mark.skipif(

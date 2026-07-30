@@ -31,9 +31,10 @@ local mode gates separately on what is installed — see ``_local_memory_policy_
 
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from typing_extensions import Annotated
 
 #: Named starting points accepted wherever a policy is expected, instead of a field dict.
 MEMORY_PRESETS = ('exact', 'max_context', 'off')
@@ -267,3 +268,35 @@ class MemoryReport(BaseModel):
             "because a warning would land in the server's log rather than reaching you."
         ),
     )
+
+
+def _accept_another_packages_policy(value: Any) -> Any:
+    """Let an instance of ``synthefy_nori``'s ``MemoryPolicy`` validate as this one.
+
+    Anyone with ``synthefy-nori`` installed may reasonably build the library's own
+    ``MemoryPolicy`` and pass it. It is a different class with the same name, so pydantic
+    refuses it — and the message it produces ("input should be an instance of MemoryPolicy")
+    is actively misleading to someone who is holding exactly that. Dump it to a dict and let
+    normal validation take over.
+
+    ``exclude_unset`` so only the fields that caller actually set survive: the server (or the
+    library, in local mode) then applies its own defaults to the rest, instead of this client
+    freezing whatever the defaults happened to be when it was installed.
+
+    A BeforeValidator rather than a helper called from ``predict()``: attached to the type it
+    applies on construction, on assignment, and anywhere the annotation is reused — there is no
+    call site to forget.
+    """
+    if value is None or isinstance(value, (str, dict, MemoryPolicy)):
+        return value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(exclude_unset=True)
+    return value  # let pydantic produce the type error
+
+
+#: What ``memory_policy=`` accepts: a preset name, a policy, a plain dict (validated into one),
+#: or another package's equivalent. Anything else is a pydantic error before a request is sent.
+MemoryPolicyInput = Annotated[
+    Union[MemoryPreset, MemoryPolicy], BeforeValidator(_accept_another_packages_policy)
+]
