@@ -428,26 +428,26 @@ client = SynthefyNoriClient(api_key="your_api_key", mode="auto")
 print(client.mode)  # "local" if synthefy-nori is installed, else "remote"
 ```
 
-### Large Tables and Memory (`memory=`)
+### Large Tables and Memory (`memory_policy=`)
 
 Nori does in-context regression, so your table is **input**: one prediction keeps a
 per-layer key/value cache over every context row, and that cache — not the
-~6M-parameter model — is what exhausts GPU memory on a big table. `memory=` decides
+~6M-parameter model — is what exhausts GPU memory on a big table. `memory_policy=` decides
 what to do about it. Omit it and the defaults handle almost every request.
 
 ```python
 # A preset...
-preds = client.predict(X_train, y_train, X_test, memory="exact")        # never quantize
-preds = client.predict(X_train, y_train, X_test, memory="max_context")  # fit the largest table
+preds = client.predict(X_train, y_train, X_test, memory_policy="exact")        # never quantize
+preds = client.predict(X_train, y_train, X_test, memory_policy="max_context")  # fit the largest table
 
 # ...individual fields...
-preds = client.predict(X_train, y_train, X_test, memory={"cache_dtype": "int8"})
+preds = client.predict(X_train, y_train, X_test, memory_policy={"cache_dtype": "int8"})
 
 # ...or the library's own pydantic model, if you have synthefy-nori installed. Same schema,
 # so you get validation at construction and IDE completion, with nothing duplicated here.
 from synthefy_nori import MemoryPolicy
 preds = client.predict(X_train, y_train, X_test,
-                       memory=MemoryPolicy(cache_dtype="int8", gpu_budget_frac=0.5))
+                       memory_policy=MemoryPolicy(cache_dtype="int8", gpu_budget_frac=0.5))
 
 print(client.last_memory_report["rung"])  # e.g. "resident_bf16"
 ```
@@ -467,7 +467,7 @@ request, so it is not knowable from your side.
 
 **Only the int8 rungs trade accuracy**, and they are reached only when full precision
 will not fit. `offload_*` moves bytes to host RAM rather than approximating, so it is
-bit-identical to staying resident. Set `memory={"allow_subsample": False}` to turn a
+bit-identical to staying resident. Set `memory_policy={"allow_subsample": False}` to turn a
 silently shortened context into an error instead.
 
 One field behaves differently over the network: **`elements_budget`**. The cache is only

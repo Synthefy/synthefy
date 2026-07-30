@@ -91,9 +91,9 @@ def table():
 @pytest.fixture(scope="module")
 def baseline(client, table):
     """The exact-rung predictions every other case is compared against."""
-    predictions = client.predict(*table, memory=rungs.BASELINE.memory)
+    predictions = client.predict(*table, memory_policy=rungs.BASELINE.memory)
     report = client.last_memory_report
-    assert report is not None, "the deployment ignored memory= (it predates the field)"
+    assert report is not None, "the deployment ignored memory_policy= (it predates the field)"
     assert report["query_chunk"] < rungs.N_QUERY, (
         f"query_chunk={report['query_chunk']} does not chunk {rungs.N_QUERY} query rows, so no "
         "cache is reused and every rung assertion below would be vacuous"
@@ -104,7 +104,7 @@ def baseline(client, table):
 class TestRungsThroughTheClient:
     @pytest.mark.parametrize("case", rungs.CASES, ids=lambda c: c.label)
     def test_the_rung_the_case_asks_for_is_what_runs(self, client, table, baseline, case):
-        predictions = client.predict(*table, memory=case.memory)
+        predictions = client.predict(*table, memory_policy=case.memory)
         report = client.last_memory_report
 
         assert report is not None, "no memory_report came back"
@@ -135,7 +135,7 @@ class TestPolicyPlumbing:
         # Validation lives in the library and runs server-side before the forward pass, so this
         # should come back fast and carry the library's own message.
         with pytest.raises(BadRequestError) as excinfo:
-            client.predict(*table[:2], table[2][:8], memory={"int8": True})
+            client.predict(*table[:2], table[2][:8], memory_policy={"int8": True})
         assert "int8" in str(excinfo.value)
 
     def test_a_forbidden_subsample_is_a_400_not_a_500(self, client, table):
@@ -143,12 +143,12 @@ class TestPolicyPlumbing:
         with pytest.raises(BadRequestError) as excinfo:
             client.predict(
                 *table[:2], table[2][:8],
-                memory={"allow_subsample": False, "elements_budget": 500},
+                memory_policy={"allow_subsample": False, "elements_budget": 500},
             )
         assert "allow_subsample" in str(excinfo.value)
 
     def test_the_host_budget_is_clamped_and_says_so(self, client, table):
-        client.predict(*table[:2], table[2][:8], memory={"host_budget_frac": 0.95})
+        client.predict(*table[:2], table[2][:8], memory_policy={"host_budget_frac": 0.95})
         report = client.last_memory_report or {}
         assert "host_budget_frac" in (report.get("clamped") or []), (
             "an over-large host budget must be capped and reported, never applied silently: "

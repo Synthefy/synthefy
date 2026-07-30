@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`memory=` on `predict()` — the serving-memory policy, at parity with the local package.**
+- **`memory_policy=` on `predict()` — the serving-memory policy, at parity with the local package.**
   Either a preset name (`"exact"`, `"max_context"`, `"off"`) or an object of fields, e.g.
   `{"cache_dtype": "int8"}`. Nori does in-context regression, so your table is *input*: one
   prediction keeps a per-layer key/value cache over every context row, and that cache — not
@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`memory` / `memory_report` on `NoriPredictRequest` / `NoriPredictResponse`**, mirroring the
   hosted contract.
 
-- **`memory=` also accepts a `MemoryPolicy` instance** — the pydantic model from `synthefy-nori`,
+- **`memory_policy=` also accepts a `MemoryPolicy` instance** — the pydantic model from `synthefy-nori`,
   which *is* the schema. This client does not redeclare the policy's fields, so there is nothing
   here to drift from the library: a preset name or dict is validated server-side (where the rules
   live), and anyone with `synthefy-nori` installed can pass the real model and get validation at
@@ -45,13 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- A `predict()` call that sets `memory=` and gets **no** `memory_report` back now raises
+- A `predict()` call that sets `memory_policy=` and gets **no** `memory_report` back now raises
   `ValueError`. A deployment predating the field ignores it and returns default-memory
   predictions that are numerically valid, so nothing in `predictions` reveals the policy was
   dropped — the server echoes the report precisely so this is detectable, and believing a
   policy took effect when it did not is worse than an error.
 
-- A request that does **not** set `memory=` is byte-for-byte what it was before: the field is
+- A request that does **not** set `memory_policy=` is byte-for-byte what it was before: the field is
   omitted from the payload entirely rather than sent as `null`.
 
 ## [6.0.0]

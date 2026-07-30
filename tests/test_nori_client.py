@@ -917,7 +917,7 @@ def test_request_model_roundtrip():
         # Optional serving-memory policy. None by default, and _predict_remote excludes it
         # from the payload when unset, so an existing caller's request is unchanged on the
         # wire -- see test_a_request_without_memory_does_not_send_the_field.
-        "memory": None,
+        "memory_policy": None,
     }
 
 
@@ -1359,7 +1359,7 @@ def test_text_columns_requires_dataframe():
 
 
 # ------------------------------------------------------------------ memory policy
-# `memory=` is the serving-memory policy, at parity with the local package. The wire half is
+# `memory_policy=` is the serving-memory policy, at parity with the local package. The wire half is
 # what these cover: that it reaches the request only when asked for, that what the server
 # reports comes back to the caller, and that a deployment which IGNORES it is treated as a
 # failure rather than as success.
@@ -1406,7 +1406,7 @@ def test_a_request_without_memory_does_not_send_the_field():
     capture: Dict = {}
     client = _client_with(_memory_handler(capture))
     client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST)
-    assert "memory" not in capture["body"]
+    assert "memory_policy" not in capture["body"]
     assert set(capture["body"]) == {"X_train", "y_train", "X_test", "task", "model"}
     assert client.last_memory_report is None
 
@@ -1419,14 +1419,14 @@ def test_a_request_without_memory_does_not_send_the_field():
 def test_a_policy_is_sent_verbatim(policy):
     capture: Dict = {}
     client = _client_with(_memory_handler(capture, _REPORT))
-    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory=policy)
-    assert capture["body"]["memory"] == policy
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy=policy)
+    assert capture["body"]["memory_policy"] == policy
 
 
 def test_the_servers_report_reaches_the_caller():
     """The rung depends on the replica's free VRAM, so the response is the only source."""
     client = _client_with(_memory_handler({}, _REPORT))
-    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory={"cache_dtype": "int8"})
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy={"cache_dtype": "int8"})
     assert client.last_memory_report == _REPORT
     assert client.last_memory_report["rung"] == "resident_int8"
 
@@ -1441,7 +1441,7 @@ def test_a_deployment_that_ignores_the_policy_is_an_error_not_a_success():
     """
     client = _client_with(_memory_handler({}))  # no memory_report in the response
     with pytest.raises(ValueError, match="did not report back"):
-        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory="exact")
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy="exact")
 
 
 def test_the_report_is_cleared_between_calls():
@@ -1449,7 +1449,7 @@ def test_the_report_is_cleared_between_calls():
     capture: Dict = {}
     client = SynthefyNoriClient(api_key="k", model="nori-30m", mode="remote")
     _attach_mock(client, _memory_handler(capture, _REPORT))
-    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory="exact")
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy="exact")
     assert client.last_memory_report is not None
 
     _attach_mock(client, _memory_handler(capture))  # a call that sets no policy
@@ -1467,7 +1467,7 @@ def test_the_server_rejection_message_is_surfaced_unchanged():
 
     client = _client_with(handler)
     with pytest.raises(BadRequestError) as excinfo:
-        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory={"int8": True})
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy={"int8": True})
     assert "int8" in str(excinfo.value)
 
 
@@ -1475,16 +1475,16 @@ def test_the_request_model_accepts_both_shapes():
     from synthefy import NoriPredictRequest
 
     assert NoriPredictRequest(
-        X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST, memory="exact"
-    ).memory == "exact"
+        X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST, memory_policy="exact"
+    ).memory_policy == "exact"
     assert NoriPredictRequest(
         X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST,
-        memory={"cache_dtype": "int8"},
-    ).memory == {"cache_dtype": "int8"}
+        memory_policy={"cache_dtype": "int8"},
+    ).memory_policy == {"cache_dtype": "int8"}
     # Unset by default, so the field cannot change an existing caller's payload.
     assert NoriPredictRequest(
         X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST
-    ).memory is None
+    ).memory_policy is None
 
 
 def test_local_mode_refuses_memory_on_an_old_synthefy_nori(monkeypatch):
@@ -1496,7 +1496,7 @@ def test_local_mode_refuses_memory_on_an_old_synthefy_nori(monkeypatch):
     monkeypatch.setattr(module, "_load_local_predict", lambda: (lambda *a, **k: [0.0, 0.0]))
     client = SynthefyNoriClient(model="nori-30m", mode="local")
     with pytest.raises(ImportError, match="0.13.0"):
-        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory="exact")
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy="exact")
 
 
 def test_local_mode_forwards_the_policy_when_supported(monkeypatch):
@@ -1515,8 +1515,8 @@ def test_local_mode_forwards_the_policy_when_supported(monkeypatch):
     monkeypatch.setattr(module, "_local_available", lambda: True)
     monkeypatch.setattr(module, "_load_local_predict", lambda: fake_predict)
     client = SynthefyNoriClient(model="nori-30m", mode="local")
-    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory={"cache_dtype": "int8"})
-    assert seen["memory"] == {"cache_dtype": "int8"}
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy={"cache_dtype": "int8"})
+    assert seen["memory_policy"] == {"cache_dtype": "int8"}
     # Documented asymmetry: the functional local path discards the estimator that holds the
     # report, so there is nothing to surface.
     assert client.last_memory_report is None
@@ -1547,8 +1547,8 @@ def test_a_policy_object_is_serialised_for_the_wire():
         "cache": True, "cache_dtype": "int8", "gpu_budget_absolute_gb": None,
         "rung": None, "est_cache_gb": None,
     })
-    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory=policy)
-    sent = capture["body"]["memory"]
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy=policy)
+    sent = capture["body"]["memory_policy"]
     assert sent == {"cache": True, "cache_dtype": "int8"}
     # The decided-output fields must not be sent: the server rejects a policy carrying a rung,
     # because re-using resolved values as configuration skips every coherence check.
@@ -1560,14 +1560,14 @@ def test_an_already_resolved_policy_keeps_its_rung_so_the_server_can_reject_it()
     capture: Dict = {}
     client = _client_with(_memory_handler(capture, _REPORT))
     client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST,
-                   memory=_FakePolicy({"cache": True, "rung": "resident_bf16"}))
-    assert capture["body"]["memory"]["rung"] == "resident_bf16"
+                   memory_policy=_FakePolicy({"cache": True, "rung": "resident_bf16"}))
+    assert capture["body"]["memory_policy"]["rung"] == "resident_bf16"
 
 
 def test_a_nonsense_memory_type_is_rejected_locally():
     client = _client_with(_memory_handler({}, _REPORT))
     with pytest.raises(TypeError, match="preset name, a dict, or a MemoryPolicy"):
-        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory=object())
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy=object())
 
 
 @pytest.mark.skipif(
@@ -1585,8 +1585,8 @@ def test_the_real_memory_policy_round_trips_through_the_client():
     capture: Dict = {}
     client = _client_with(_memory_handler(capture, _REPORT))
     client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST,
-                   memory=MemoryPolicy(cache_dtype="int8", gpu_budget_frac=0.6))
-    sent = capture["body"]["memory"]
+                   memory_policy=MemoryPolicy(cache_dtype="int8", gpu_budget_frac=0.6))
+    sent = capture["body"]["memory_policy"]
     assert sent["cache_dtype"] == "int8" and sent["gpu_budget_frac"] == 0.6
     assert "rung" not in sent, "an unresolved policy must not carry decided outputs"
     # And what we send back must be something the model itself accepts, i.e. a real round trip.
