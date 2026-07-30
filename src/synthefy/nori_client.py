@@ -680,6 +680,40 @@ def _local_discretize_available() -> bool:
     return importlib.util.find_spec("synthefy_nori.discretize") is not None
 
 
+def _as_memory_payload(
+    memory: Optional[Union[str, Dict[str, Any], Any]],
+) -> Optional[Union[str, Dict[str, Any]]]:
+    """Normalise ``memory=`` to what goes on the wire, accepting a ``MemoryPolicy``.
+
+    The policy's real schema is ``synthefy_nori.inference.memory_policy.MemoryPolicy``, a
+    pydantic model. This client does not redeclare those fields, and deliberately: a second
+    copy here would drift from the library's the moment a field is added, and both sides
+    would keep passing their own tests. So the accepted shapes are
+
+    * a preset name (``str``) or a plain ``dict`` -- what a remote-only install uses, validated
+      server-side, which is where the rules live
+    * a **MemoryPolicy instance** -- anyone who has ``synthefy-nori`` (the ``local`` extra) can
+      build one and get the real thing: IDE completion, validation at construction, and one
+      definition of the fields. It is duck-typed on ``model_dump`` rather than imported, so
+      this stays a thin API client with no dependency on the model package.
+
+    ``exclude_none=True`` drops the fields ``resolve()`` fills in (``rung``, ``est_cache_gb``,
+    …), which are ``None`` on a policy built as input, along with any optional field left
+    unset. A policy that HAS been resolved keeps its non-null ``rung`` and is rejected
+    server-side -- correctly, since feeding decided outputs back in as configuration skips
+    every coherence check. That check is not duplicated here either.
+    """
+    if memory is None or isinstance(memory, (str, dict)):
+        return memory
+    model_dump = getattr(memory, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(exclude_none=True)
+    raise TypeError(
+        f"memory must be a preset name, a dict, or a MemoryPolicy; got "
+        f"{type(memory).__name__}"
+    )
+
+
 def _local_memory_policy_available() -> bool:
     """Return ``True`` if the installed ``synthefy-nori`` accepts ``memory=``.
 
@@ -1097,12 +1131,15 @@ class SynthefyNoriClient:
             context has no 1s). Passing it alone activates discretization
             with the package default strategy in local mode (``"map-cell"``);
             remote mode requires ``discretize="snap-mean"`` explicitly.
-        memory : str or dict, optional
+        memory : str, dict, or MemoryPolicy, optional
             Serving-memory policy, at parity with the local package's
-            ``NoriRegressor(memory=...)``. Either a preset name -- ``"exact"`` (never
+            ``NoriRegressor(memory=...)``. A preset name -- ``"exact"`` (never
             trade accuracy for memory), ``"max_context"`` (fit the largest table you
-            can), ``"off"`` (no cache) -- or an object of individual fields, e.g.
-            ``{"cache_dtype": "int8"}``.
+            can), ``"off"`` (no cache) -- a dict of individual fields, e.g.
+            ``{"cache_dtype": "int8"}``, or a
+            ``synthefy_nori.inference.memory_policy.MemoryPolicy`` instance if you have
+            ``synthefy-nori`` installed. The model is the schema: this client does not
+            redeclare the fields, so there is nothing here to drift from it.
 
             Nori does in-context regression, so your table is *input*: one prediction
             keeps a per-layer key/value cache over every context row, and that cache --
@@ -1180,7 +1217,7 @@ class SynthefyNoriClient:
             max_categorical_cardinality=max_categorical_cardinality,
             categorical_encoding=categorical_encoding,
         )
-        request.memory = memory
+        request.memory = _as_memory_payload(memory)
         # Cleared per call so a stale report from an earlier prediction can never be read
         # as belonging to this one.
         self.last_memory_report = None

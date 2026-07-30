@@ -440,8 +440,14 @@ what to do about it. Omit it and the defaults handle almost every request.
 preds = client.predict(X_train, y_train, X_test, memory="exact")        # never quantize
 preds = client.predict(X_train, y_train, X_test, memory="max_context")  # fit the largest table
 
-# ...or individual fields.
+# ...individual fields...
 preds = client.predict(X_train, y_train, X_test, memory={"cache_dtype": "int8"})
+
+# ...or the library's own pydantic model, if you have synthefy-nori installed. Same schema,
+# so you get validation at construction and IDE completion, with nothing duplicated here.
+from synthefy_nori import MemoryPolicy
+preds = client.predict(X_train, y_train, X_test,
+                       memory=MemoryPolicy(cache_dtype="int8", gpu_budget_frac=0.5))
 
 print(client.last_memory_report["rung"])  # e.g. "resident_bf16"
 ```

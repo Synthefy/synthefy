@@ -34,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`memory` / `memory_report` on `NoriPredictRequest` / `NoriPredictResponse`**, mirroring the
   hosted contract.
 
+- **`memory=` also accepts a `MemoryPolicy` instance** — the pydantic model from `synthefy-nori`,
+  which *is* the schema. This client does not redeclare the policy's fields, so there is nothing
+  here to drift from the library: a preset name or dict is validated server-side (where the rules
+  live), and anyone with `synthefy-nori` installed can pass the real model and get validation at
+  construction plus IDE completion. Duck-typed on `model_dump`, so the client keeps no dependency
+  on the model package. The fields `resolve()` decides (`rung`, `est_cache_gb`, …) are stripped
+  before sending; a policy that has already been resolved keeps its `rung` and is rejected
+  server-side, which is correct and not re-implemented here.
+
 ### Changed
 
 - A `predict()` call that sets `memory=` and gets **no** `memory_report` back now raises

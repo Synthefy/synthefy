@@ -6,6 +6,7 @@ the optional ``synthefy-nori`` package is installed.
 """
 
 import builtins
+import importlib.util
 import json
 import math
 import warnings
@@ -1519,3 +1520,74 @@ def test_local_mode_forwards_the_policy_when_supported(monkeypatch):
     # Documented asymmetry: the functional local path discards the estimator that holds the
     # report, so there is nothing to surface.
     assert client.last_memory_report is None
+
+
+# --------------------------------- the model in synthefy-nori IS the schema
+class _FakePolicy:
+    """Duck-types MemoryPolicy: the client normalises on model_dump, not on the type.
+
+    Duck-typed on purpose — importing the real model would make a thin API client depend on
+    the model package (and its torch tree) just to name a shape.
+    """
+
+    def __init__(self, dumped):
+        self._dumped = dumped
+
+    def model_dump(self, **kwargs):
+        if kwargs.get("exclude_none"):
+            return {k: v for k, v in self._dumped.items() if v is not None}
+        return dict(self._dumped)
+
+
+def test_a_policy_object_is_serialised_for_the_wire():
+    capture: Dict = {}
+    client = _client_with(_memory_handler(capture, _REPORT))
+    # As a real MemoryPolicy looks: inputs set, resolve()'s outputs still None.
+    policy = _FakePolicy({
+        "cache": True, "cache_dtype": "int8", "gpu_budget_absolute_gb": None,
+        "rung": None, "est_cache_gb": None,
+    })
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory=policy)
+    sent = capture["body"]["memory"]
+    assert sent == {"cache": True, "cache_dtype": "int8"}
+    # The decided-output fields must not be sent: the server rejects a policy carrying a rung,
+    # because re-using resolved values as configuration skips every coherence check.
+    assert "rung" not in sent and "est_cache_gb" not in sent
+
+
+def test_an_already_resolved_policy_keeps_its_rung_so_the_server_can_reject_it():
+    """The client does not duplicate that check — it just doesn't hide the evidence."""
+    capture: Dict = {}
+    client = _client_with(_memory_handler(capture, _REPORT))
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST,
+                   memory=_FakePolicy({"cache": True, "rung": "resident_bf16"}))
+    assert capture["body"]["memory"]["rung"] == "resident_bf16"
+
+
+def test_a_nonsense_memory_type_is_rejected_locally():
+    client = _client_with(_memory_handler({}, _REPORT))
+    with pytest.raises(TypeError, match="preset name, a dict, or a MemoryPolicy"):
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory=object())
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("synthefy_nori") is None,
+    reason="needs synthefy-nori installed to compare against the real model",
+)
+def test_the_real_memory_policy_round_trips_through_the_client():
+    """Drift guard: the actual model must survive the client's normalisation.
+
+    Skips without synthefy-nori (an optional extra), so it runs wherever the two are installed
+    together — which is where a divergence would matter.
+    """
+    from synthefy_nori.inference.memory_policy import MemoryPolicy
+
+    capture: Dict = {}
+    client = _client_with(_memory_handler(capture, _REPORT))
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST,
+                   memory=MemoryPolicy(cache_dtype="int8", gpu_budget_frac=0.6))
+    sent = capture["body"]["memory"]
+    assert sent["cache_dtype"] == "int8" and sent["gpu_budget_frac"] == 0.6
+    assert "rung" not in sent, "an unresolved policy must not carry decided outputs"
+    # And what we send back must be something the model itself accepts, i.e. a real round trip.
+    assert MemoryPolicy(**sent).cache_dtype == "int8"
