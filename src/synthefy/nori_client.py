@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 import httpx
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from synthefy.nori_data_models import MemoryPolicy, MemoryReport
 from synthefy.api_client import (
@@ -179,11 +179,17 @@ class NoriPredictRequest(BaseModel):
         byte-for-byte what it always was.
     """
 
+    # validate_assignment so `request.memory_policy = {...}` is COERCED into MemoryPolicy the
+    # same way the constructor would. Without it, assignment after construction silently
+    # bypasses validation and leaves a raw dict behind -- the field would claim a type it does
+    # not hold, and the serialisation below would fail on it.
+    model_config = ConfigDict(validate_assignment=True)
+
     X_train: List[List[float]]
     y_train: List[float]
     X_test: List[List[float]]
     task: str = DEFAULT_TASK
-    memory_policy: Optional[Union[str, Dict[str, Any]]] = None
+    memory_policy: Optional[Union[str, MemoryPolicy]] = None
 
 
 class NoriPredictResponse(BaseModel):
@@ -682,33 +688,29 @@ def _local_discretize_available() -> bool:
 
 
 def _as_memory_policy_payload(
-    memory_policy: Optional[Union[str, Dict[str, Any], Any]],
-) -> Optional[Union[str, Dict[str, Any]]]:
-    """Normalise ``memory_policy=`` to what goes on the wire, accepting a ``MemoryPolicy``.
+    memory_policy: Optional[Union[str, Dict[str, Any], MemoryPolicy, Any]],
+) -> Optional[Union[str, Dict[str, Any], MemoryPolicy]]:
+    """Normalise the one policy shape pydantic cannot validate on its own.
 
-    The policy's real schema is ``synthefy_nori.inference.memory_policy.MemoryPolicy``, a
-    pydantic model. This client does not redeclare those fields, and deliberately: a second
-    copy here would drift from the library's the moment a field is added, and both sides
-    would keep passing their own tests. So the accepted shapes are
+    ``NoriPredictRequest.memory_policy`` is typed ``str | MemoryPolicy``, so pydantic handles
+    almost everything: a preset name passes through, and a plain dict is validated INTO
+    :class:`~synthefy.nori_data_models.MemoryPolicy` — bounds, enums and unknown-field
+    rejection included, before any request is sent.
 
-    * a preset name (``str``) or a plain ``dict`` -- what a remote-only install uses, validated
-      server-side, which is where the rules live
-    * a **MemoryPolicy instance** -- anyone who has ``synthefy-nori`` (the ``local`` extra) can
-      build one and get the real thing: IDE completion, validation at construction, and one
-      definition of the fields. It is duck-typed on ``model_dump`` rather than imported, so
-      this stays a thin API client with no dependency on the model package.
+    The exception is an instance of the *library's* ``MemoryPolicy``
+    (``synthefy_nori.inference.memory_policy``), which anyone with ``synthefy-nori`` installed
+    may reasonably pass. It is a different class, so pydantic rejects it rather than
+    re-validating. Dump it to a dict and let pydantic take it from there — duck-typed on
+    ``model_dump`` so this module keeps no dependency on the model package.
 
-    ``exclude_none=True`` drops the fields ``resolve()`` fills in (``rung``, ``est_cache_gb``,
-    …), which are ``None`` on a policy built as input, along with any optional field left
-    unset. A policy that HAS been resolved keeps its non-null ``rung`` and is rejected
-    server-side -- correctly, since feeding decided outputs back in as configuration skips
-    every coherence check. That check is not duplicated here either.
+    ``exclude_unset`` matters here for the same reason it does on the way out: carry only what
+    the caller actually set, so the server's defaults apply to the rest.
     """
-    if memory_policy is None or isinstance(memory_policy, (str, dict)):
+    if memory_policy is None or isinstance(memory_policy, (str, dict, MemoryPolicy)):
         return memory_policy
     model_dump = getattr(memory_policy, "model_dump", None)
     if callable(model_dump):
-        return model_dump(exclude_none=True)
+        return model_dump(exclude_unset=True)
     raise TypeError(
         f"memory_policy must be a preset name, a dict, or a MemoryPolicy; got "
         f"{type(memory_policy).__name__}"
@@ -1278,7 +1280,15 @@ class SynthefyNoriClient:
                     "memory_policy= requires synthefy-nori >= 0.13.0 (the serving-memory policy). "
                     'Upgrade with: pip install -U "synthefy[local]".'
                 )
-            extra["memory_policy"] = request.memory_policy
+            # A dict, not our MemoryPolicy instance: the library's coerce() accepts its OWN
+            # class, a dict, a preset name or None -- a same-named class from this package is
+            # none of those and would raise. exclude_unset for the same reason as the wire
+            # path: let the library apply its own defaults to whatever was not set.
+            extra["memory_policy"] = (
+                request.memory_policy
+                if isinstance(request.memory_policy, str)
+                else request.memory_policy.model_dump(exclude_unset=True)
+            )
         if self._local_variant is not None:
             # Selecting a non-base local variant needs a synthefy-nori that exposes the model=
             # selector; fail with a clear upgrade hint instead of an opaque TypeError on old builds.
@@ -1310,13 +1320,19 @@ class SynthefyNoriClient:
         timeout: Optional[float],
         extra_headers: Optional[Dict[str, str]],
     ) -> List[float]:
-        # Drop `memory_policy` when unset rather than sending an explicit null: the hosted schema
-        # declares it as a preset name or an object (never null) with additionalProperties
-        # false, and a request that does not use the feature must stay byte-for-byte what it
-        # was before the feature existed.
-        payload = request.model_dump(
-            exclude={"memory_policy"} if request.memory_policy is None else set()
-        )
+        # Serialise the policy with exclude_unset so only the fields the caller actually set
+        # go on the wire. This is what lets the field be a typed MemoryPolicy without the
+        # CLIENT pinning the SERVER's defaults: a full dump would send all twelve fields, and a
+        # later change to a default server-side would then be silently overridden by every
+        # older client. A request that sets no policy omits the key entirely rather than
+        # sending null -- the hosted schema declares a preset name or an object, never null.
+        payload = request.model_dump(exclude={"memory_policy"})
+        if request.memory_policy is not None:
+            payload["memory_policy"] = (
+                request.memory_policy
+                if isinstance(request.memory_policy, str)
+                else request.memory_policy.model_dump(exclude_unset=True)
+            )
         if self.model is not None:
             payload["model"] = self.model
 

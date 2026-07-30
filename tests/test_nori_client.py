@@ -1459,29 +1459,49 @@ def test_the_report_is_cleared_between_calls():
 
 
 def test_the_server_rejection_message_is_surfaced_unchanged():
-    """Validation lives in the library; the client must not paraphrase its message."""
-    detail = ("Invalid 'memory': 1 validation error for MemoryPolicy\nint8\n  "
-              "Extra inputs are not permitted")
+    """For rules the client does NOT copy, the server's own message must come through.
+
+    Field-level mistakes (unknown name, bad type, out of bounds) are now caught locally by
+    MemoryPolicy. What stays server-side is which COMBINATIONS are incoherent -- deliberately
+    not duplicated, because a second copy of behaviour would drift in a way a schema comparison
+    cannot see. This exercises one of those: cache=False with a cache-only field.
+    """
+    detail = ("Invalid 'memory_policy': 1 validation error for MemoryPolicy\n  Value error, "
+              "cache=False cannot be combined with cache_dtype")
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, json={"error": {"detail": detail}})
 
     client = _client_with(handler)
     with pytest.raises(BadRequestError) as excinfo:
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST,
+                       memory_policy={"cache": False, "cache_dtype": "int8"})
+    assert "cannot be combined" in str(excinfo.value)
+
+
+def test_an_unknown_field_is_now_caught_locally_without_a_round_trip():
+    """The client's model forbids extras, so a typo does not cost a request."""
+    client = _client_with(_memory_handler({}, _REPORT))
+    with pytest.raises(ValueError, match="int8"):
         client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy={"int8": True})
-    assert "int8" in str(excinfo.value)
 
 
 def test_the_request_model_accepts_both_shapes():
-    from synthefy import NoriPredictRequest
+    from synthefy import MemoryPolicy, NoriPredictRequest
 
     assert NoriPredictRequest(
         X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST, memory_policy="exact"
     ).memory_policy == "exact"
-    assert NoriPredictRequest(
+    # A dict is COERCED into the typed model by pydantic, which is the point of the field
+    # being MemoryPolicy: bounds, enums and unknown-field rejection happen before any request.
+    coerced = NoriPredictRequest(
         X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST,
         memory_policy={"cache_dtype": "int8"},
-    ).memory_policy == {"cache_dtype": "int8"}
+    ).memory_policy
+    assert isinstance(coerced, MemoryPolicy)
+    assert coerced.cache_dtype == "int8"
+    # ...and only the field that was set is carried, so the server's defaults still apply.
+    assert coerced.model_dump(exclude_unset=True) == {"cache_dtype": "int8"}
     # Unset by default, so the field cannot change an existing caller's payload.
     assert NoriPredictRequest(
         X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST
@@ -1517,6 +1537,8 @@ def test_local_mode_forwards_the_policy_when_supported(monkeypatch):
     monkeypatch.setattr(module, "_load_local_predict", lambda: fake_predict)
     client = SynthefyNoriClient(model="nori-30m", mode="local")
     client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy={"cache_dtype": "int8"})
+    # Forwarded as a DICT, not our MemoryPolicy class: the library's coerce() accepts its own
+    # class, a dict, a preset or None, and a same-named class from this package is none of them.
     assert seen["memory_policy"] == {"cache_dtype": "int8"}
     # Documented asymmetry: the functional local path discards the estimator that holds the
     # report, so there is nothing to surface.
@@ -1535,7 +1557,9 @@ class _FakePolicy:
         self._dumped = dumped
 
     def model_dump(self, **kwargs):
-        if kwargs.get("exclude_none"):
+        # The client asks for exclude_unset: carry only what the caller actually set, so the
+        # server's defaults apply to everything else.
+        if kwargs.get("exclude_unset"):
             return {k: v for k, v in self._dumped.items() if v is not None}
         return dict(self._dumped)
 
@@ -1556,13 +1580,17 @@ def test_a_policy_object_is_serialised_for_the_wire():
     assert "rung" not in sent and "est_cache_gb" not in sent
 
 
-def test_an_already_resolved_policy_keeps_its_rung_so_the_server_can_reject_it():
-    """The client does not duplicate that check — it just doesn't hide the evidence."""
-    capture: Dict = {}
-    client = _client_with(_memory_handler(capture, _REPORT))
-    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST,
-                   memory_policy=_FakePolicy({"cache": True, "rung": "resident_bf16"}))
-    assert capture["body"]["memory_policy"]["rung"] == "resident_bf16"
+def test_feeding_a_resolved_report_back_in_is_caught_locally():
+    """The decided fields live on MemoryReport, not MemoryPolicy, so this fails before the call.
+
+    The server rejects it too — re-using decided outputs as configuration would skip every
+    coherence check — but the client's model has no `rung` field and forbids extras, so the
+    mistake costs no round trip.
+    """
+    client = _client_with(_memory_handler({}, _REPORT))
+    with pytest.raises(ValueError, match="rung"):
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST,
+                       memory_policy={"cache": True, "rung": "resident_bf16"})
 
 
 def test_a_nonsense_memory_type_is_rejected_locally():
