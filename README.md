@@ -428,6 +428,57 @@ client = SynthefyNoriClient(api_key="your_api_key", mode="auto")
 print(client.mode)  # "local" if synthefy-nori is installed, else "remote"
 ```
 
+### Large Tables and Memory (`memory_policy=`)
+
+Nori does in-context regression, so your table is **input**: one prediction keeps a
+per-layer key/value cache over every context row, and that cache — not the
+~6M-parameter model — is what exhausts GPU memory on a big table. `memory_policy=` decides
+what to do about it. Omit it and the defaults handle almost every request.
+
+```python
+# A preset...
+preds = client.predict(X_train, y_train, X_test, memory_policy="exact")        # never quantize
+preds = client.predict(X_train, y_train, X_test, memory_policy="max_context")  # fit the largest table
+
+# ...individual fields...
+preds = client.predict(X_train, y_train, X_test, memory_policy={"cache_dtype": "int8"})
+
+# ...or the typed model, which ships with the client — no synthefy-nori needed. Validated
+# before the request goes out, so a typo or an out-of-range value costs no round trip.
+from synthefy import MemoryPolicy
+preds = client.predict(X_train, y_train, X_test,
+                       memory_policy=MemoryPolicy(cache_dtype="int8", gpu_budget_frac=0.5))
+
+print(client.last_memory_report["rung"])  # e.g. "resident_bf16"
+```
+
+`last_memory_report` is how you learn what actually happened, and it is worth reading:
+the fallback chosen depends on the replica's free VRAM at that moment, not on your
+request, so it is not knowable from your side.
+
+| field | meaning |
+|---|---|
+| `rung` | which fallback served it — `resident_bf16` → `resident_int8` → `offload_bf16` → `offload_int8` → `plain_loop` → `no_cache` |
+| `est_cache_gb` / `resident_gb` | the cache's full-precision size, and what stayed in GPU memory |
+| `query_chunk` | query rows per forward pass |
+| `dropped_context_rows` | context rows discarded to fit — **the one accuracy loss worth checking**, `0` unless subsampling engaged |
+| `clamped` | fields the server capped (host-RAM budgets only) |
+| `notes` | remarks about the policy you sent, e.g. a budget that cannot take effect |
+
+**Only the int8 rungs trade accuracy**, and they are reached only when full precision
+will not fit. `offload_*` moves bytes to host RAM rather than approximating, so it is
+bit-identical to staying resident. Set `memory_policy={"allow_subsample": False}` to turn a
+silently shortened context into an error instead.
+
+One field behaves differently over the network: **`elements_budget`**. The cache is only
+built when the query set spans more than one chunk, and at default settings that needs
+far more query rows than the hosted request-body limit (~64 MiB) allows — so lowering
+`elements_budget` is what lets a hosted request reach the cached path at all.
+
+In `mode="local"` the same argument works, but needs `synthefy-nori >= 0.13.0`; older
+builds raise `ImportError` with an upgrade hint. `last_memory_report` stays `None`
+locally — use `NoriRegressor` and read `memory_report_` if you need it there.
+
 ### Categorical / Ordinal Targets (`discretize=` / `categorical_levels=`)
 
 When the target only takes a small set of discrete values (a 1–5 rating, a

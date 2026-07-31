@@ -5,6 +5,68 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.1.0]
+
+### Added
+
+- **`memory_policy=` on `predict()` — the serving-memory policy, at parity with the local package.**
+  Either a preset name (`"exact"`, `"max_context"`, `"off"`) or an object of fields, e.g.
+  `{"cache_dtype": "int8"}`. Nori does in-context regression, so your table is *input*: one
+  prediction keeps a per-layer key/value cache over every context row, and that cache — not
+  the ~6M-parameter model — is what exhausts GPU memory on a big table. This decides what to
+  do about it. Omit it for defaults that suit almost every request.
+
+  Works in **both** modes. Remote, the policy is validated server-side and an incoherent one
+  is rejected before any inference is paid for. Local, it needs `synthefy-nori >= 0.13.0` and
+  raises `ImportError` with an upgrade hint on older builds.
+
+- **`SynthefyNoriClient.last_memory_report`** — what the server actually did about the policy
+  on the most recent `predict`: which fallback rung ran, the estimated and resident cache
+  sizes, the query chunk, any dropped context rows, plus any fields the server clamped and
+  coherence notes about the policy you sent. Worth reading, because the rung is decided by the
+  replica's free VRAM rather than by your request, so it is not knowable client-side.
+
+  Remote mode only. In local mode the policy is honoured but no report exists: the client goes
+  through `synthefy_nori.predict`, which builds an estimator internally and discards it, and
+  the report lives on that estimator. Use `NoriRegressor` and read `memory_report_` directly if
+  you need it locally.
+
+- **`MemoryPolicy` and `MemoryReport` pydantic models** (`synthefy.nori_data_models`), exported
+  from `synthefy`. `NoriPredictRequest.memory_policy` is typed `str | MemoryPolicy`, so a plain
+  dict is **validated before any request is sent** — an unknown field, a bad type or an
+  out-of-range value is caught locally instead of costing a round trip. Which *combinations* are
+  incoherent stays server-side, deliberately: duplicating that behaviour would drift in a way a
+  schema comparison cannot detect.
+
+  Only the fields you actually set go on the wire (`exclude_unset`), so the client never pins the
+  server's defaults — a later change to a default reaches existing clients rather than being
+  silently overridden by them.
+
+  The models are a copy of the library's, policed by 20 parity tests today and by the cross-repo
+  sync check specced in SynthefyPFN#119.
+
+- **`memory_report` on `NoriPredictResponse`**, mirroring the hosted contract.
+
+- **`memory_policy=` also accepts a `MemoryPolicy` instance** — the pydantic model from `synthefy-nori`,
+  which *is* the schema. This client does not redeclare the policy's fields, so there is nothing
+  here to drift from the library: a preset name or dict is validated server-side (where the rules
+  live), and anyone with `synthefy-nori` installed can pass the real model and get validation at
+  construction plus IDE completion. Duck-typed on `model_dump`, so the client keeps no dependency
+  on the model package. The fields `resolve()` decides (`rung`, `est_cache_gb`, …) are stripped
+  before sending; a policy that has already been resolved keeps its `rung` and is rejected
+  server-side, which is correct and not re-implemented here.
+
+### Changed
+
+- A `predict()` call that sets `memory_policy=` and gets **no** `memory_report` back now raises
+  `ValueError`. A deployment predating the field ignores it and returns default-memory
+  predictions that are numerically valid, so nothing in `predictions` reveals the policy was
+  dropped — the server echoes the report precisely so this is detectable, and believing a
+  policy took effect when it did not is worse than an error.
+
+- A request that does **not** set `memory_policy=` is byte-for-byte what it was before: the field is
+  omitted from the payload entirely rather than sent as `null`.
+
 ## [6.0.0]
 
 ### Removed (breaking)

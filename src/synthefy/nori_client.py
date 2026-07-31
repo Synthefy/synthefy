@@ -30,8 +30,9 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 import httpx
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
+from synthefy.nori_data_models import MemoryPolicyInput, MemoryReport
 from synthefy.api_client import (
     APIConnectionError,
     APITimeoutError,
@@ -170,12 +171,25 @@ class NoriPredictRequest(BaseModel):
         Query rows to predict. Shape ``(n_query, n_features)``.
     task : str, default "regression"
         The prediction task. Currently only ``"regression"`` is supported.
+    memory_policy : str or dict, optional
+        Serving-memory policy, at parity with the local package's
+        ``NoriRegressor(memory_policy=...)``: a preset name (``"exact"``,
+        ``"max_context"``, ``"off"``) or an object of policy fields. Omitted from
+        the wire payload entirely when unset, so a request that does not use it is
+        byte-for-byte what it always was.
     """
+
+    # validate_assignment so `request.memory_policy = {...}` is COERCED into MemoryPolicy the
+    # same way the constructor would. Without it, assignment after construction silently
+    # bypasses validation and leaves a raw dict behind -- the field would claim a type it does
+    # not hold, and the serialisation below would fail on it.
+    model_config = ConfigDict(validate_assignment=True)
 
     X_train: List[List[float]]
     y_train: List[float]
     X_test: List[List[float]]
     task: str = DEFAULT_TASK
+    memory_policy: Optional[MemoryPolicyInput] = None
 
 
 class NoriPredictResponse(BaseModel):
@@ -187,10 +201,14 @@ class NoriPredictResponse(BaseModel):
         The task echoed back by the server (e.g. ``"regression"``).
     predictions : List[float]
         One predicted value per row of ``X_test``.
+    memory_report : dict, optional
+        Present only when the request set ``memory_policy``: what the server actually did
+        about it. See :attr:`SynthefyNoriClient.last_memory_report`.
     """
 
     task: str
     predictions: List[float]
+    memory_report: Optional[MemoryReport] = None
 
 
 def _frame_columns(arr: Any) -> Optional[List[Any]]:
@@ -669,6 +687,20 @@ def _local_discretize_available() -> bool:
     return importlib.util.find_spec("synthefy_nori.discretize") is not None
 
 
+def _local_memory_policy_available() -> bool:
+    """Return ``True`` if the installed ``synthefy-nori`` accepts ``memory_policy=``.
+
+    The policy landed in synthefy-nori 0.13.0 as ``synthefy_nori.inference.memory_policy``,
+    so the module's presence is the capability.
+
+    A signature probe would NOT work here, unlike the ``model=`` check further down:
+    ``synthefy_nori.predict`` forwards ``**kwargs`` to ``NoriRegressor``, so ``memory_policy``
+    never appears in its parameters on any version, and gating on that would reject
+    every build including new ones.
+    """
+    return importlib.util.find_spec("synthefy_nori.inference.memory_policy") is not None
+
+
 # The one discretization strategy computable from the hosted endpoint's
 # response: it returns only point predictions (the distribution mean), and
 # "snap-mean" is by definition the nearest level to that mean — so snapping
@@ -934,6 +966,21 @@ class SynthefyNoriClient:
             self.api_key = api_key  # unused in local mode; may be None
             self.client = None
 
+        #: What the server did about ``memory_policy=`` on the most recent :meth:`predict`, or
+        #: ``None`` if that call did not set one. Mirrors the local package's
+        #: ``NoriRegressor.memory_report_``: which fallback rung ran, the estimated and
+        #: resident cache sizes, the query chunk, any dropped context rows, plus which fields
+        #: the server clamped and any coherence notes about the policy sent.
+        #:
+        #: Worth reading, because the rung is decided by the replica's free VRAM rather than
+        #: by the request -- it is not knowable from the client side.
+        #:
+        #: **Remote mode only.** In local mode the policy IS honoured, but no report is
+        #: available: the client goes through ``synthefy_nori.predict``, which builds an
+        #: estimator internally and discards it, and the report lives on that estimator. Use
+        #: ``NoriRegressor`` directly and read ``memory_report_`` if you need it locally.
+        self.last_memory_report: Optional[Dict[str, Any]] = None
+
     # Context manager support (sync) and utilities
     def __enter__(self) -> "SynthefyNoriClient":
         return self
@@ -963,6 +1010,7 @@ class SynthefyNoriClient:
         embedder: str = "minilm",
         discretize: Optional[str] = None,
         categorical_levels: Optional[VectorLike] = None,
+        memory_policy: Optional[MemoryPolicyInput] = None,
         timeout: Optional[float] = None,
         extra_headers: Optional[Dict[str, str]] = None,
     ) -> Union[List[float], pd.Series]:
@@ -1056,6 +1104,32 @@ class SynthefyNoriClient:
             context has no 1s). Passing it alone activates discretization
             with the package default strategy in local mode (``"map-cell"``);
             remote mode requires ``discretize="snap-mean"`` explicitly.
+        memory_policy : str, dict, or MemoryPolicy, optional
+            Serving-memory policy, at parity with the local package's
+            ``NoriRegressor(memory_policy=...)``. A preset name -- ``"exact"`` (never
+            trade accuracy for memory), ``"max_context"`` (fit the largest table you
+            can), ``"off"`` (no cache) -- a dict of individual fields, e.g.
+            ``{"cache_dtype": "int8"}``, or a
+            ``synthefy_nori.inference.memory_policy.MemoryPolicy`` instance if you have
+            ``synthefy-nori`` installed. The model is the schema: this client does not
+            redeclare the fields, so there is nothing here to drift from it.
+
+            Nori does in-context regression, so your table is *input*: one prediction
+            keeps a per-layer key/value cache over every context row, and that cache --
+            not the model -- is what exhausts GPU memory on a big table. This decides what
+            to do about it. Omit it for defaults that suit almost every request.
+
+            Works in both modes. Remote, the policy is validated server-side and what it
+            actually did comes back in :attr:`last_memory_report`; an incoherent policy is
+            rejected before any inference is paid for. Local, it needs
+            ``synthefy-nori >= 0.13.0`` and raises :class:`ImportError` with an upgrade
+            hint on older builds.
+
+            One field behaves differently over the network: ``elements_budget``. The cache
+            is only built when the query set spans more than one chunk, which at default
+            settings needs far more query rows than the hosted request-body limit allows
+            (~64 MiB) -- so lowering ``elements_budget`` is what lets a hosted caller reach
+            the cached path at all.
         timeout : float or None, optional
             Override the client timeout for this request (remote mode only;
             ignored in local mode).
@@ -1092,6 +1166,12 @@ class SynthefyNoriClient:
             carrying the server's ``error`` string as the message.
         AuthenticationError
             In remote mode, if the API key is missing or invalid (HTTP 401).
+        ValueError
+            In remote mode, if ``memory_policy=`` was sent and the deployment did not report back
+            on it -- meaning it was silently ignored, so the policy had no effect.
+        ImportError
+            In local mode, if ``memory_policy=`` was given but the installed ``synthefy-nori``
+            predates it.
         APITimeoutError
             In remote mode, if the request times out.
         APIConnectionError
@@ -1110,6 +1190,10 @@ class SynthefyNoriClient:
             max_categorical_cardinality=max_categorical_cardinality,
             categorical_encoding=categorical_encoding,
         )
+        request.memory_policy = memory_policy
+        # Cleared per call so a stale report from an earlier prediction can never be read
+        # as belonging to this one.
+        self.last_memory_report = None
         if self.mode == "local":
             predictions = self._predict_local(
                 request,
@@ -1160,6 +1244,21 @@ class SynthefyNoriClient:
                 extra["discretize"] = discretize
             if categorical_levels is not None:
                 extra["categorical_levels"] = categorical_levels
+        if request.memory_policy is not None:
+            if not _local_memory_policy_available():
+                raise ImportError(
+                    "memory_policy= requires synthefy-nori >= 0.13.0 (the serving-memory policy). "
+                    'Upgrade with: pip install -U "synthefy[local]".'
+                )
+            # A dict, not our MemoryPolicy instance: the library's coerce() accepts its OWN
+            # class, a dict, a preset name or None -- a same-named class from this package is
+            # none of those and would raise. exclude_unset for the same reason as the wire
+            # path: let the library apply its own defaults to whatever was not set.
+            extra["memory_policy"] = (
+                request.memory_policy
+                if isinstance(request.memory_policy, str)
+                else request.memory_policy.model_dump(exclude_unset=True)
+            )
         if self._local_variant is not None:
             # Selecting a non-base local variant needs a synthefy-nori that exposes the model=
             # selector; fail with a clear upgrade hint instead of an opaque TypeError on old builds.
@@ -1191,7 +1290,19 @@ class SynthefyNoriClient:
         timeout: Optional[float],
         extra_headers: Optional[Dict[str, str]],
     ) -> List[float]:
-        payload = request.model_dump()
+        # Serialise the policy with exclude_unset so only the fields the caller actually set
+        # go on the wire. This is what lets the field be a typed MemoryPolicy without the
+        # CLIENT pinning the SERVER's defaults: a full dump would send all twelve fields, and a
+        # later change to a default server-side would then be silently overridden by every
+        # older client. A request that sets no policy omits the key entirely rather than
+        # sending null -- the hosted schema declares a preset name or an object, never null.
+        payload = request.model_dump(exclude={"memory_policy"})
+        if request.memory_policy is not None:
+            payload["memory_policy"] = (
+                request.memory_policy
+                if isinstance(request.memory_policy, str)
+                else request.memory_policy.model_dump(exclude_unset=True)
+            )
         if self.model is not None:
             payload["model"] = self.model
 
@@ -1202,6 +1313,22 @@ class SynthefyNoriClient:
             timeout=timeout,
         )
         parsed = NoriPredictResponse(**response.json())
+        if request.memory_policy is not None:
+            # The capability handshake. A deployment that predates `memory_policy` ignores the field
+            # and answers with default-memory predictions that are numerically valid, so
+            # nothing in `predictions` reveals that the policy was dropped. The server echoes
+            # `memory_report` precisely so this is detectable -- refuse to let a caller believe
+            # a policy took effect when it did not.
+            if parsed.memory_report is None:
+                raise ValueError(
+                    "memory_policy= was sent but the deployment did not report back on it, which "
+                    "means it was ignored: the predictions are valid but the policy had no "
+                    "effect. The endpoint is most likely running a build from before "
+                    "memory_policy= was supported. Omit memory_policy= to use the deployment's defaults."
+                )
+            # Validated through MemoryReport, exposed as a dict: the library's own
+            # memory_report_ is a dict, and `report["rung"]` is how it is read.
+            self.last_memory_report = parsed.memory_report.model_dump()
         return parsed.predictions
 
     def _headers(

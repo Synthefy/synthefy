@@ -6,11 +6,12 @@ the optional ``synthefy-nori`` package is installed.
 """
 
 import builtins
+import importlib.util
 import json
 import math
 import warnings
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Optional, Callable, Dict, List
 
 import httpx
 import numpy as np
@@ -913,6 +914,10 @@ def test_request_model_roundtrip():
         "y_train": [3.0],
         "X_test": [[4.0, 5.0]],
         "task": "regression",
+        # Optional serving-memory policy. None by default, and _predict_remote excludes it
+        # from the payload when unset, so an existing caller's request is unchanged on the
+        # wire -- see test_a_request_without_memory_does_not_send_the_field.
+        "memory_policy": None,
     }
 
 
@@ -1351,3 +1356,290 @@ def test_text_columns_requires_dataframe():
     _attach_mock(client, _ok_handler([1.0], {}))
     with pytest.raises(ValueError):
         client.predict([[1.0, 2.0]], [1.0], [[1.0, 2.0]], text_columns=["review"])
+
+
+# ------------------------------------------------------------------ memory policy
+# `memory_policy=` is the serving-memory policy, at parity with the local package. The wire half is
+# what these cover: that it reaches the request only when asked for, that what the server
+# reports comes back to the caller, and that a deployment which IGNORES it is treated as a
+# failure rather than as success.
+def _memory_handler(capture: Dict, report: Optional[Dict] = None) -> Handler:
+    """Mock endpoint that echoes a memory_report, as a supporting deployment does."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        capture["body"] = json.loads(request.content)
+        body: Dict[str, object] = {"task": "regression", "predictions": [1.0, 2.0]}
+        if report is not None:
+            body["memory_report"] = report
+        return httpx.Response(200, json=body)
+
+    return handler
+
+
+_REPORT = {
+    "rung": "resident_int8",
+    "est_cache_gb": 0.0122,
+    "resident_gb": 0.0065,
+    "query_chunk": 256,
+    "dropped_context_rows": 0,
+    "clamped": [],
+    "notes": [],
+}
+
+_X_TRAIN = [[0.0, 1.0], [1.0, 0.0], [0.5, 0.5]]
+_Y_TRAIN = [0.0, 1.0, 0.5]
+_X_TEST = [[0.2, 0.8], [0.9, 0.1]]
+
+
+def _client_with(handler: Handler) -> SynthefyNoriClient:
+    client = SynthefyNoriClient(api_key="k", model="nori-30m", mode="remote")
+    _attach_mock(client, handler)
+    return client
+
+
+def test_a_request_without_memory_does_not_send_the_field():
+    """The default request must stay byte-for-byte what it was before this feature.
+
+    Not merely "memory is null": the hosted schema declares the field as a preset name or an
+    object and forbids unknown properties, so an explicit null is a different request.
+    """
+    capture: Dict = {}
+    client = _client_with(_memory_handler(capture))
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST)
+    assert "memory_policy" not in capture["body"]
+    assert set(capture["body"]) == {"X_train", "y_train", "X_test", "task", "model"}
+    assert client.last_memory_report is None
+
+
+@pytest.mark.parametrize(
+    "policy",
+    ["exact", "max_context", "off", {"cache_dtype": "int8"}, {"elements_budget": 4000}],
+    ids=["exact", "max_context", "off", "dict", "elements_budget"],
+)
+def test_a_policy_is_sent_verbatim(policy):
+    capture: Dict = {}
+    client = _client_with(_memory_handler(capture, _REPORT))
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy=policy)
+    assert capture["body"]["memory_policy"] == policy
+
+
+def test_the_servers_report_reaches_the_caller():
+    """The rung depends on the replica's free VRAM, so the response is the only source."""
+    client = _client_with(_memory_handler({}, _REPORT))
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy={"cache_dtype": "int8"})
+    # Validated through MemoryReport, exposed as a dict (as the library does).
+    assert client.last_memory_report["rung"] == "resident_int8"
+    assert client.last_memory_report["est_cache_gb"] == _REPORT["est_cache_gb"]
+
+
+def test_a_deployment_that_ignores_the_policy_is_an_error_not_a_success():
+    """The capability handshake, and the reason the server echoes at all.
+
+    A deployment predating `memory` drops the field and returns default-memory predictions
+    that are numerically valid — nothing in `predictions` reveals the policy was ignored. So
+    a missing report has to be surfaced, or the caller believes something took effect that
+    did not.
+    """
+    client = _client_with(_memory_handler({}))  # no memory_report in the response
+    with pytest.raises(ValueError, match="did not report back"):
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy="exact")
+
+
+def test_the_report_is_cleared_between_calls():
+    """A stale report must not be readable as belonging to the call that just ran."""
+    capture: Dict = {}
+    client = SynthefyNoriClient(api_key="k", model="nori-30m", mode="remote")
+    _attach_mock(client, _memory_handler(capture, _REPORT))
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy="exact")
+    assert client.last_memory_report is not None
+
+    _attach_mock(client, _memory_handler(capture))  # a call that sets no policy
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST)
+    assert client.last_memory_report is None, "the previous call's report leaked"
+
+
+def test_the_server_rejection_message_is_surfaced_unchanged():
+    """For rules the client does NOT copy, the server's own message must come through.
+
+    Field-level mistakes (unknown name, bad type, out of bounds) are now caught locally by
+    MemoryPolicy. What stays server-side is which COMBINATIONS are incoherent -- deliberately
+    not duplicated, because a second copy of behaviour would drift in a way a schema comparison
+    cannot see. This exercises one of those: cache=False with a cache-only field.
+    """
+    detail = ("Invalid 'memory_policy': 1 validation error for MemoryPolicy\n  Value error, "
+              "cache=False cannot be combined with cache_dtype")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"detail": detail}})
+
+    client = _client_with(handler)
+    with pytest.raises(BadRequestError) as excinfo:
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST,
+                       memory_policy={"cache": False, "cache_dtype": "int8"})
+    assert "cannot be combined" in str(excinfo.value)
+
+
+def test_an_unknown_field_is_now_caught_locally_without_a_round_trip():
+    """The client's model forbids extras, so a typo does not cost a request."""
+    client = _client_with(_memory_handler({}, _REPORT))
+    with pytest.raises(ValueError, match="int8"):
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy={"int8": True})
+
+
+def test_the_request_model_accepts_both_shapes():
+    from synthefy import MemoryPolicy, NoriPredictRequest
+
+    assert NoriPredictRequest(
+        X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST, memory_policy="exact"
+    ).memory_policy == "exact"
+    # A dict is COERCED into the typed model by pydantic, which is the point of the field
+    # being MemoryPolicy: bounds, enums and unknown-field rejection happen before any request.
+    coerced = NoriPredictRequest(
+        X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST,
+        memory_policy={"cache_dtype": "int8"},
+    ).memory_policy
+    assert isinstance(coerced, MemoryPolicy)
+    assert coerced.cache_dtype == "int8"
+    # ...and only the field that was set is carried, so the server's defaults still apply.
+    assert coerced.model_dump(exclude_unset=True) == {"cache_dtype": "int8"}
+    # Unset by default, so the field cannot change an existing caller's payload.
+    assert NoriPredictRequest(
+        X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST
+    ).memory_policy is None
+
+
+def test_local_mode_refuses_memory_on_an_old_synthefy_nori(monkeypatch):
+    """An opaque TypeError from deep inside the library is not an acceptable answer."""
+    from synthefy import nori_client as module
+
+    monkeypatch.setattr(module, "_local_memory_policy_available", lambda: False)
+    monkeypatch.setattr(module, "_local_available", lambda: True)
+    monkeypatch.setattr(module, "_load_local_predict", lambda: (lambda *a, **k: [0.0, 0.0]))
+    client = SynthefyNoriClient(model="nori-30m", mode="local")
+    with pytest.raises(ImportError, match="0.13.0"):
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy="exact")
+
+
+def test_local_mode_forwards_the_policy_when_supported(monkeypatch):
+    from synthefy import nori_client as module
+
+    seen: Dict = {}
+
+    def fake_predict(X_train, y_train, X_test, *, model=None, **kwargs):
+        # `model` is explicit because the client gates the local variant on
+        # signature(local_predict).parameters, exactly as synthefy_nori.predict declares it.
+        seen["model"] = model
+        seen.update(kwargs)
+        return [0.1, 0.2]
+
+    monkeypatch.setattr(module, "_local_memory_policy_available", lambda: True)
+    monkeypatch.setattr(module, "_local_available", lambda: True)
+    monkeypatch.setattr(module, "_load_local_predict", lambda: fake_predict)
+    client = SynthefyNoriClient(model="nori-30m", mode="local")
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy={"cache_dtype": "int8"})
+    # Forwarded as a DICT, not our MemoryPolicy class: the library's coerce() accepts its own
+    # class, a dict, a preset or None, and a same-named class from this package is none of them.
+    assert seen["memory_policy"] == {"cache_dtype": "int8"}
+    # Documented asymmetry: the functional local path discards the estimator that holds the
+    # report, so there is nothing to surface.
+    assert client.last_memory_report is None
+
+
+# --------------------------------- the model in synthefy-nori IS the schema
+class _FakePolicy:
+    """Stands in for ANOTHER package's MemoryPolicy — same name, different class.
+
+    pydantic refuses a foreign class outright, with a message that is misleading to someone
+    holding exactly what it says it wants, so the annotation carries a BeforeValidator that
+    dumps anything model_dump-shaped. Duck-typed here for the same reason it is there: so the
+    client needs no dependency on the model package.
+
+    Duck-typed on purpose — importing the real model would make a thin API client depend on
+    the model package (and its torch tree) just to name a shape.
+    """
+
+    def __init__(self, dumped):
+        self._dumped = dumped
+
+    def model_dump(self, **kwargs):
+        # The client asks for exclude_unset: carry only what the caller actually set, so the
+        # server's defaults apply to everything else.
+        if kwargs.get("exclude_unset"):
+            return {k: v for k, v in self._dumped.items() if v is not None}
+        return dict(self._dumped)
+
+
+def test_a_policy_object_is_serialised_for_the_wire():
+    capture: Dict = {}
+    client = _client_with(_memory_handler(capture, _REPORT))
+    # As a real MemoryPolicy looks: inputs set, resolve()'s outputs still None.
+    policy = _FakePolicy({
+        "cache": True, "cache_dtype": "int8", "gpu_budget_absolute_gb": None,
+        "rung": None, "est_cache_gb": None,
+    })
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy=policy)
+    sent = capture["body"]["memory_policy"]
+    assert sent == {"cache": True, "cache_dtype": "int8"}
+    # The decided-output fields must not be sent: the server rejects a policy carrying a rung,
+    # because re-using resolved values as configuration skips every coherence check.
+    assert "rung" not in sent and "est_cache_gb" not in sent
+
+
+def test_feeding_a_resolved_report_back_in_is_caught_locally():
+    """The decided fields live on MemoryReport, not MemoryPolicy, so this fails before the call.
+
+    The server rejects it too — re-using decided outputs as configuration would skip every
+    coherence check — but the client's model has no `rung` field and forbids extras, so the
+    mistake costs no round trip.
+    """
+    client = _client_with(_memory_handler({}, _REPORT))
+    with pytest.raises(ValueError, match="rung"):
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST,
+                       memory_policy={"cache": True, "rung": "resident_bf16"})
+
+
+def test_a_nonsense_memory_policy_type_is_rejected_locally():
+    """One error type for every bad policy, from pydantic, before any request is sent."""
+    client = _client_with(_memory_handler({}, _REPORT))
+    with pytest.raises(ValueError):   # pydantic ValidationError subclasses ValueError
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy=object())
+
+
+def test_an_unknown_preset_is_caught_locally():
+    """The preset is a Literal, not a bare str, so a typo never reaches the network.
+
+    It used to: the field accepted any string, so "aggressive" was sent and came back a 400.
+    """
+    client = _client_with(_memory_handler({}, _REPORT))
+    with pytest.raises(ValueError, match="aggressive"):
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy="aggressive")
+
+
+def test_out_of_range_values_are_caught_locally():
+    client = _client_with(_memory_handler({}, _REPORT))
+    with pytest.raises(ValueError):
+        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy={"gpu_budget_frac": 1.5})
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("synthefy_nori") is None
+    or importlib.util.find_spec("synthefy_nori.inference.memory_policy") is None,
+    reason="needs synthefy-nori >= 0.13.0, which is the version that has MemoryPolicy",
+)
+def test_the_real_memory_policy_round_trips_through_the_client():
+    """Drift guard: the actual model must survive the client's normalisation.
+
+    Skips without synthefy-nori (an optional extra), so it runs wherever the two are installed
+    together — which is where a divergence would matter.
+    """
+    from synthefy_nori.inference.memory_policy import MemoryPolicy
+
+    capture: Dict = {}
+    client = _client_with(_memory_handler(capture, _REPORT))
+    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST,
+                   memory_policy=MemoryPolicy(cache_dtype="int8", gpu_budget_frac=0.6))
+    sent = capture["body"]["memory_policy"]
+    assert sent["cache_dtype"] == "int8" and sent["gpu_budget_frac"] == 0.6
+    assert "rung" not in sent, "an unresolved policy must not carry decided outputs"
+    # And what we send back must be something the model itself accepts, i.e. a real round trip.
+    assert MemoryPolicy(**sent).cache_dtype == "int8"
