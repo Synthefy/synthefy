@@ -4,7 +4,8 @@ These intentionally hit a real deployment, and they are the **third** runner of 
 definition. The cases come from ``synthefy_nori.testing.rung_cases``, which also drives:
 
 - the in-process engine test on a local GPU (synthefy-nori-internal)
-- the raw-HTTP deployment smoke, ``ci/baseten_smoke_memory.py`` (same repo)
+- the raw-HTTP deployment smoke suite, which POSTs the same table to the deployment
+  without a client in the way (same repo; scoped to synthefy-nori-internal#312)
 
 Sharing them across repo boundaries is the point. The serving-memory ladder is decided by
 hardware, so "the rung is right locally", "the rung is right on the deployment" and "the rung is
