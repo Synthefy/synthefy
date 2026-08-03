@@ -21,7 +21,8 @@ name: Publish to PyPI
 # ── Cutting a release ────────────────────────────────────────────────────────
 # 1. Bump `version` in pyproject.toml and `__version__` in src/synthefy/__init__.py.
 # 2. Create a GitHub Release (e.g. tag v3.1.0). Publishing the release triggers
-#    this workflow, which builds the package and uploads it to PyPI.
+#    this workflow, which runs the unit tests, builds the package, and uploads it
+#    to PyPI. A failing suite stops the release before anything is uploaded.
 
 on:
   release:
@@ -29,8 +30,44 @@ on:
   workflow_dispatch: {}  # also allow manual runs from the Actions tab
 
 jobs:
+  # Publishing is irreversible: PyPI never lets a version be replaced or reused, so a
+  # broken wheel is permanent and the only remedy is a new version. Tests.yaml gates
+  # pushes and PRs, but a Release is neither, so until now nothing ran the suite on the
+  # exact commit being shipped. This job closes that: build depends on it, publish
+  # depends on build, so a red suite cannot reach PyPI.
+  #
+  # Deliberately mirrors tests.yaml's unit-test step rather than calling it, because the
+  # online tests are excluded here on purpose (see below).
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --dev --extra text
+
+      # Unit tests only. The online tests under tests/online_tests need SYNTHEFY_API_KEY
+      # and hit a live deployment, so a rotated key or a cold backend would block a
+      # release for reasons unrelated to the artifact. They still gate every push and PR
+      # via tests.yaml; this job asserts the wheel's own code is sound.
+      - name: Run unit tests
+        run: uv run pytest tests/ --ignore=tests/online_tests -q
+
   build:
     name: Build distributions
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
