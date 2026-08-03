@@ -299,7 +299,8 @@ confirm with me before making changes.
 
 Prefer not to run it locally? Use the hosted API instead — create a key at
 https://docs.synthefy.com/setup/api_key, then:
-`client = SynthefyNoriClient(api_key="YOUR_API_KEY")` (or set SYNTHEFY_NORI_API_KEY).
+`client = SynthefyNoriClient(api_key="YOUR_API_KEY", model="nori-6m")` (or set
+SYNTHEFY_NORI_API_KEY).
 ````
 
 ### Hosted Usage (`mode="remote"`)
@@ -309,7 +310,7 @@ from synthefy import SynthefyNoriClient
 
 # The key is sent as `Authorization: Bearer <key>` (gateway default).
 # Pass it explicitly or set the SYNTHEFY_NORI_API_KEY environment variable.
-client = SynthefyNoriClient(api_key="your_api_key")
+client = SynthefyNoriClient(api_key="your_api_key", model="nori-6m")
 
 predictions = client.predict(
     X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],  # context features
@@ -412,7 +413,7 @@ supports Python >= 3.9, the same floor as the base package.
 ```python
 from synthefy import SynthefyNoriClient
 
-client = SynthefyNoriClient(mode="local")  # no API key needed
+client = SynthefyNoriClient(mode="local", model="nori-6m")  # no API key needed
 predictions = client.predict(
     X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
     y_train=[1.0, 1.0, 2.0],
@@ -429,7 +430,7 @@ transparently fall back to the hosted endpoint (which then requires an API key)
 otherwise:
 
 ```python
-client = SynthefyNoriClient(api_key="your_api_key", mode="auto")
+client = SynthefyNoriClient(api_key="your_api_key", mode="auto", model="nori-6m")
 print(client.mode)  # "local" if synthefy-nori is installed, else "remote"
 ```
 
@@ -599,12 +600,15 @@ continuous mean is already optimal for those metrics.
 
 ### SynthefyNoriClient (Tabular Regression)
 
-- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None)` — `model` is **required** (`"nori-6m"` / `"nori-30m"`; `None` for a dedicated endpoint)
+- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None)` — `model` is **required** (`"nori-6m"` / `"nori-30m"`; `None` for a single-model endpoint of your own)
   - `mode`: `"remote"` (hosted, default), `"local"` (in-process via
     `synthefy-nori`), or `"auto"` (local if installed, else remote).
   - `api_key` (remote mode) falls back to the `SYNTHEFY_NORI_API_KEY`
     environment variable. Not required in local mode.
-  - For a dedicated deployment, pass `base_url`/`endpoint` and `model=None`.
+  - Hosted Nori is reached by gateway slug — that is the path Synthefy meters,
+    rate-limits and grants per key. To target a single-model endpoint you host
+    yourself, pass your own `base_url`/`endpoint` with `model=None`, which omits
+    `"model"` from the request body.
 - `predict(X_train, y_train, X_test, task="regression", *, output_type="mean", quantiles=None, timeout=None, extra_headers=None) -> List[float]`
   - Returns one predicted value per row of `X_test`. `timeout`/`extra_headers`
     apply to remote mode only.
