@@ -5,6 +5,51 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.2.0]
+
+### Added
+
+- **Prediction intervals on `SynthefyNoriClient.predict`** via `output_type=` and
+  `quantiles=` — shared selectors use the same meanings as
+  `synthefy-nori`'s `NoriRegressor.predict`. Nori's forward pass already produces
+  a full predictive distribution, so intervals cost nothing extra; previously the
+  client could only return its mean.
+  - `output_type="mean"` (default, unchanged) and `"median"` — one value per
+    query row.
+  - `output_type="quantiles"` with `quantiles=[0.1, 0.5, 0.9]` — returns
+    `(n_levels, n_query)`, level-major, so
+    `lo, mid, hi = client.predict(..., output_type="quantiles", quantiles=[...])`
+    unpacks directly (matching `NoriRegressor`). Levels come back in the order
+    you passed them.
+  - `output_type="full"` — the whole quantile bank as
+    `{"quantiles": (n_query, K), "taus": (K,), "mean": (n_query,)}`, for CRPS /
+    interval scoring and calibration.
+  - `as_pandas=True` returns a `DataFrame` for the distribution output types: one
+    row per query row (indexed by `X_test`), one column per level, named
+    `"<target>[<level>]"` — the same convention the forecasting client uses.
+- **Local mode routes through `NoriRegressor`** for any non-default
+  `output_type`. The functional `synthefy_nori.predict` cannot express it (it
+  forwards `**kwargs` to the constructor), so local intervals were previously
+  unreachable. `output_type="mean"` still goes through the functional path, so
+  the default local behavior is unchanged.
+- **Remote mode** sends `output_type`/`quantiles` and reads the quantile block
+  back. The hosted endpoint echoes the `output_type` it honored and the client
+  raises `ValueError` on a mismatch: a deployment that predates distribution
+  output answers with the distribution mean, which is indistinguishable from a
+  genuine `"median"` result, so the handshake turns a silently wrong answer into
+  a clear error naming the fix. Server-side support: `synthefy-nori-internal`
+  `baseten/` (see the PR that pairs with this one).
+
+### Notes
+
+- An ordinary `predict(...)` call is byte-for-byte unchanged: the new fields are
+  omitted from the request body unless explicitly requested, so nothing changes
+  for existing deployments.
+- `output_type`/`quantiles=` cannot be combined with
+  `discretize=`/`categorical_levels=` (discrete labels vs. a distribution
+  summary are different answers) — raises `ValueError`, mirroring
+  `NoriRegressor`.
+
 ## [6.1.0]
 
 ### Added

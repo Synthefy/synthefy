@@ -10,6 +10,7 @@ A Python client for the Synthefy API. It provides time series **forecasting** (s
 ## Features
 
 - **Tabular In-Context Regression**: `SynthefyNoriClient` predicts from labeled context rows in a single forward pass — hosted on Baseten or fully local, no training step
+- **Free Prediction Intervals**: the same forward pass carries a full predictive distribution, so `output_type="quantiles"` returns calibrated bands at no extra cost
 - **Sync & Async Support**: Separate clients for synchronous and asynchronous operations
 - **Professional Error Handling**: Comprehensive exception hierarchy with detailed error messages
 - **Retry Logic**: Built-in exponential backoff for transient errors (rate limits, server errors)
@@ -284,6 +285,10 @@ Synthefy API if you'd rather not run it locally.
        y_train=y_train,   # continuous target
        X_test=X_test,     # rows to score
    )                      # -> list of floats, one per X_test row (as_pandas=True for a Series)
+
+   # Prediction intervals come free — no conformal/quantile add-ons:
+   lo, mid, hi = client.predict(X_train, y_train, X_test,
+                                output_type="quantiles", quantiles=[0.1, 0.5, 0.9])
    ```
 
 X is a numeric feature matrix (or a pandas DataFrame — non-numeric columns are
@@ -479,6 +484,80 @@ In `mode="local"` the same argument works, but needs `synthefy-nori >= 0.13.0`; 
 builds raise `ImportError` with an upgrade hint. `last_memory_report` stays `None`
 locally — use `NoriRegressor` and read `memory_report_` if you need it there.
 
+### Prediction Intervals (`output_type=` / `quantiles=`)
+
+Nori's forward pass produces a whole predictive distribution, not just a point
+estimate, so **prediction intervals cost nothing extra** — no conformal wrapper,
+no separate quantile models:
+
+```python
+lo, mid, hi = client.predict(
+    X_train, y_train, X_test,
+    output_type="quantiles", quantiles=[0.1, 0.5, 0.9],   # an 80% interval
+)
+```
+
+`output_type` selects what comes back. Shared selectors use the same meanings as
+`synthefy-nori`'s `NoriRegressor.predict`:
+
+| `output_type` | Returns | Shape |
+| --- | --- | --- |
+| `"mean"` (default) | distribution mean — optimal for squared error / R² | `list[float]`, one per `X_test` row |
+| `"median"` | distribution median — optimal for MAE | `list[float]` |
+| `"quantiles"` | quantiles at the levels in `quantiles=` | `(n_levels, n_query)` — **level-major**, so `lo, mid, hi = ...` unpacks |
+| `"full"` | the whole quantile bank | `dict` with `"quantiles"` `(n_query, K)`, `"taus"` `(K,)`, `"mean"` `(n_query,)` |
+
+`quantiles=` takes tau levels strictly inside `(0, 1)`; it is required by — and
+valid only with — `output_type="quantiles"`. The returned rows follow **your**
+order, so `quantiles=[0.9, 0.1]` gives you high-then-low. Values come back in
+original-`y` units, sorted to a valid (monotone) quantile function per row.
+
+`as_pandas=True` returns a `DataFrame` instead: one row per `X_test` row (indexed
+by `X_test`, so the bands join straight back) and one column per level, named
+`"<target>[<level>]"` — the same convention the forecasting client uses:
+
+```python
+bands = client.predict(X_train, y_train, X_test, output_type="quantiles",
+                       quantiles=[0.1, 0.9], as_pandas=True)
+bands.columns   # ['price[0.1]', 'price[0.9]']  (named after y_train)
+```
+
+Use `"full"` for CRPS / interval scoring and calibration work; the bank is the
+checkpoint's full quantile head (K = 999 on the default checkpoint), so prefer
+`"quantiles"` when you only need a few levels — it keeps the response small.
+
+Capability differs by mode:
+
+- **Local** (`pip install "synthefy[local]"`): every `output_type` works. Needs
+  `synthefy-nori >= 0.6.0` for `output_type` (the `local` extra already pins
+  `>= 0.10.0`, so an extras install is always new enough); an older build raises
+  `ImportError` with an upgrade hint. `"quantiles"`/`"full"` need the default
+  pinball checkpoint — a `bar_distribution` checkpoint raises
+  `NotImplementedError`.
+- **Remote**: needs a hosted deployment that serves distribution output. The
+  server echoes back the `output_type` it honored, and the client **raises**
+  rather than accept a mismatch:
+
+  ```text
+  ValueError: The hosted deployment did not serve output_type='median': it omitted
+  the output_type field entirely, so it predates distribution output. Such a
+  deployment answers with the distribution mean, which is indistinguishable from a
+  real 'median' result, so this is raised rather than returning means as if they
+  were what you asked for. Use local mode (pip install "synthefy[local]", then
+  mode="local"), or point base_url/endpoint at a deployment that serves
+  distribution output.
+  ```
+
+  That handshake is the point: a deployment that ignores `output_type` answers
+  with means, which look exactly like a valid `"median"` result — so silence here
+  would be a confidently wrong answer, not a missing feature.
+
+`output_type`/`quantiles=` cannot be combined with `discretize=` /
+`categorical_levels=` (below): discrete labels and a distribution summary are
+different answers, so asking for both raises `ValueError`. An ordinary
+`predict(...)` call is unaffected by any of this — the request body it sends is
+byte-for-byte what it always was.
+
 ### Categorical / Ordinal Targets (`discretize=` / `categorical_levels=`)
 
 When the target only takes a small set of discrete values (a 1–5 rating, a
@@ -526,9 +605,16 @@ continuous mean is already optimal for those metrics.
   - `api_key` (remote mode) falls back to the `SYNTHEFY_NORI_API_KEY`
     environment variable. Not required in local mode.
   - For a dedicated deployment, pass `base_url`/`endpoint` and `model=None`.
-- `predict(X_train, y_train, X_test, task="regression", *, timeout=None, extra_headers=None) -> List[float]`
+- `predict(X_train, y_train, X_test, task="regression", *, output_type="mean", quantiles=None, timeout=None, extra_headers=None) -> List[float]`
   - Returns one predicted value per row of `X_test`. `timeout`/`extra_headers`
     apply to remote mode only.
+  - `output_type=` picks what comes back from the predictive distribution:
+    `"mean"` (default), `"median"`, `"quantiles"` (with
+    `quantiles=[...]`, returns `(n_levels, n_query)`), or `"full"` (the whole
+    quantile bank as a dict). See
+    [Prediction Intervals](#prediction-intervals-output_type--quantiles).
+    Everything other than `"mean"` needs local mode or a hosted deployment that
+    serves distribution output.
   - Inputs accept Python lists, numpy arrays, or pandas DataFrames/Series.
     Feature columns must be numeric; DataFrame `X_test` is aligned to `X_train`
     by column name; non-numeric columns are encoded (fit on `X_train`;
@@ -538,7 +624,9 @@ continuous mean is already optimal for those metrics.
     distinct training values than this — and datetime columns — are dropped with
     a warning instead of encoded.
   - `as_pandas=True` returns a pandas `Series` (named after `y_train`, indexed by
-    `X_test`) instead of the default `list[float]`.
+    `X_test`) instead of the default `list[float]` — or a `DataFrame` with one
+    column per level (`"<target>[<level>]"`) for
+    `output_type="quantiles"`/`"full"`.
   - `discretize=` / `categorical_levels=` map predictions onto a discrete
     target's levels (see
     [Categorical / Ordinal Targets](#categorical--ordinal-targets-discretize--categorical_levels));
