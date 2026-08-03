@@ -99,9 +99,9 @@ def _resolve_variant(model: Optional[str]) -> tuple:
     """Map a model selector to ``(gateway_model, local_variant)``.
 
     A known name or slug resolves via :data:`NORI_VARIANTS`; anything else (a custom gateway
-    slug, or ``None`` for a dedicated endpoint) passes through as the gateway model. The
-    ``local_variant`` is what local mode would forward to synthefy-nori's ``model=`` selector,
-    but whether a selector is actually runnable locally is enforced by
+    slug, or ``None`` for a self-hosted single-model endpoint) passes through as the gateway
+    model. The ``local_variant`` is what local mode would forward to synthefy-nori's ``model=``
+    selector, but whether a selector is actually runnable locally is enforced by
     :func:`_resolve_local_variant`, not here -- this function never raises.
     """
     if model is not None and model in NORI_VARIANTS:
@@ -1156,8 +1156,7 @@ class SynthefyNoriClient:
         if model is _MODEL_REQUIRED:
             raise ValueError(
                 "model is required -- there is no default; every request names a size. "
-                f"Choose one of: {', '.join(_MODEL_NAMES)} (a raw gateway slug is also accepted; "
-                "use model=None only to target a dedicated deployment endpoint)."
+                f"Choose one of: {', '.join(_MODEL_NAMES)} (a raw gateway slug is also accepted)."
             )
         requested_mode = mode
         if mode == "auto":
