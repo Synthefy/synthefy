@@ -425,6 +425,18 @@ predictions = client.predict(
 is imported lazily on first use; if it is not installed, a clear `ImportError` is
 raised telling you to `pip install "synthefy[local]"`.
 
+Local mode also preserves `synthefy-nori`'s degradation warnings and their messages.
+With `synthefy-nori>=0.13.1`, an SVD failure warns under `SvdFallbackWarning` while
+still returning a prediction. Scored or audited runs can turn that warning into an
+exception around the client call; the client does not catch, wrap, or rewrite it:
+
+```python
+from synthefy_nori import SvdFallbackWarning, strict_pipeline
+
+with strict_pipeline(SvdFallbackWarning):
+    predictions = client.predict(X_train, y_train, X_test)
+```
+
 Use `mode="auto"` to prefer local when `synthefy-nori` is installed and
 transparently fall back to the hosted endpoint (which then requires an API key)
 otherwise:
