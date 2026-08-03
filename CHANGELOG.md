@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Prediction intervals on `SynthefyNoriClient.predict`** via `output_type=` and
-  `quantiles=` — the same selector, with the same meanings, as
+  `quantiles=` — shared selectors use the same meanings as
   `synthefy-nori`'s `NoriRegressor.predict`. Nori's forward pass already produces
   a full predictive distribution, so intervals cost nothing extra; previously the
   client could only return its mean.

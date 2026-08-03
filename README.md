@@ -497,14 +497,13 @@ lo, mid, hi = client.predict(
 )
 ```
 
-`output_type` selects what comes back, using the same names and meanings as
+`output_type` selects what comes back. Shared selectors use the same meanings as
 `synthefy-nori`'s `NoriRegressor.predict`:
 
 | `output_type` | Returns | Shape |
 | --- | --- | --- |
 | `"mean"` (default) | distribution mean — optimal for squared error / R² | `list[float]`, one per `X_test` row |
 | `"median"` | distribution median — optimal for MAE | `list[float]` |
-| `"mode"` | distribution mode | `list[float]` |
 | `"quantiles"` | quantiles at the levels in `quantiles=` | `(n_levels, n_query)` — **level-major**, so `lo, mid, hi = ...` unpacks |
 | `"full"` | the whole quantile bank | `dict` with `"quantiles"` `(n_query, K)`, `"taus"` `(K,)`, `"mean"` `(n_query,)` |
 
@@ -610,7 +609,7 @@ continuous mean is already optimal for those metrics.
   - Returns one predicted value per row of `X_test`. `timeout`/`extra_headers`
     apply to remote mode only.
   - `output_type=` picks what comes back from the predictive distribution:
-    `"mean"` (default), `"median"`, `"mode"`, `"quantiles"` (with
+    `"mean"` (default), `"median"`, `"quantiles"` (with
     `quantiles=[...]`, returns `(n_levels, n_query)`), or `"full"` (the whole
     quantile bank as a dict). See
     [Prediction Intervals](#prediction-intervals-output_type--quantiles).

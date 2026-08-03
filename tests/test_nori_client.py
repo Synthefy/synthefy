@@ -1408,6 +1408,7 @@ def _dist_handler(
     taus=None,
     output_type: str = "quantiles",
     echo_output_type: bool = True,
+    memory_report=None,
 ) -> Handler:
     """Mock a deployment that serves distribution output.
 
@@ -1423,6 +1424,8 @@ def _dist_handler(
             body["quantiles"] = quantiles
         if taus is not None:
             body["taus"] = taus
+        if memory_report is not None:
+            body["memory_report"] = memory_report
         return httpx.Response(200, json=body)
 
     return handler
@@ -1704,11 +1707,12 @@ def _remote_client() -> SynthefyNoriClient:
 # ----------------------------------------------------- argument validation
 
 
-def test_unknown_output_type_raises_listing_the_valid_names():
+@pytest.mark.parametrize("output_type", ["mode", "p50"])
+def test_unknown_output_type_raises_listing_the_valid_names(output_type):
     client = _remote_client()
     _attach_mock(client, _ok_handler([1.0], {}))
     with pytest.raises(ValueError, match="output_type must be one of"):
-        client.predict(_XTR, _YTR, _XTE, output_type="p50")
+        client.predict(_XTR, _YTR, _XTE, output_type=output_type)
 
 
 def test_quantiles_output_type_requires_levels():
@@ -1806,6 +1810,30 @@ def test_remote_quantiles_sends_the_levels_and_returns_level_major():
     assert hi == [1.5, 2.5]
 
 
+def test_remote_quantiles_preserve_memory_policy_and_report():
+    capture: Dict = {}
+    client = _remote_client()
+    _attach_mock(client, _dist_handler(
+        capture,
+        predictions=[1.0],
+        quantiles=[[0.5, 1.0, 1.5]],
+        taus=_LEVELS,
+        memory_report=_REPORT,
+    ))
+
+    client.predict(
+        _XTR,
+        _YTR,
+        [[2.0, 2.0]],
+        output_type="quantiles",
+        quantiles=_LEVELS,
+        memory_policy={"cache_dtype": "int8"},
+    )
+
+    assert capture["body"]["memory_policy"] == {"cache_dtype": "int8"}
+    assert client.last_memory_report["rung"] == "resident_int8"
+
+
 def test_remote_quantiles_preserve_the_requested_level_order():
     # The rows follow the caller's order, not sorted order (same as NoriRegressor).
     capture: Dict = {}
@@ -1885,17 +1913,16 @@ def test_remote_full_as_pandas_gives_a_frame_and_a_series():
     assert out["taus"] == [0.25, 0.75]  # plain list, not a pandas object
 
 
-@pytest.mark.parametrize("output_type", ["median", "mode"])
-def test_remote_point_output_types_return_one_value_per_row(output_type):
+def test_remote_median_returns_one_value_per_row():
     capture: Dict = {}
     client = _remote_client()
     _attach_mock(client, _dist_handler(
-        capture, predictions=[3.0, 4.0], output_type=output_type,
+        capture, predictions=[3.0, 4.0], output_type="median",
     ))
     preds = client.predict(
-        _XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]], output_type=output_type
+        _XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]], output_type="median"
     )
-    assert capture["body"]["output_type"] == output_type
+    assert capture["body"]["output_type"] == "median"
     assert preds == [3.0, 4.0]
 
 
@@ -2010,8 +2037,9 @@ def _fake_regressor_class(seen: Dict, *, with_model=True, with_output_type=True)
     simulate a synthefy-nori too old for it (the client probes the signatures).
     """
     if with_model:
-        def __init__(self, model=None):
+        def __init__(self, model=None, memory_policy=None):
             seen["init_model"] = model
+            seen["init_memory_policy"] = memory_policy
     else:
         def __init__(self):  # noqa: E306 - old build: no model= selector
             seen["init_model"] = "<absent>"
@@ -2080,6 +2108,23 @@ def test_local_quantiles_route_through_the_estimator_api(monkeypatch):
     assert hi == [20.0, 21.0]
 
 
+def test_local_quantiles_forward_memory_policy_to_the_estimator(monkeypatch):
+    seen: Dict = {}
+    monkeypatch.setattr("synthefy.nori_client._local_memory_policy_available", lambda: True)
+    client = _local_client_with_fake(monkeypatch, seen)
+
+    client.predict(
+        _XTR,
+        _YTR,
+        _XTE,
+        output_type="quantiles",
+        quantiles=_LEVELS,
+        memory_policy={"cache_dtype": "int8"},
+    )
+
+    assert seen["init_memory_policy"] == {"cache_dtype": "int8"}
+
+
 def test_local_full_returns_the_bank_dict(monkeypatch):
     seen: Dict = {}
     client = _local_client_with_fake(monkeypatch, seen)
@@ -2094,14 +2139,13 @@ def test_local_full_returns_the_bank_dict(monkeypatch):
     assert out["mean"] == [1.0, 2.0]
 
 
-@pytest.mark.parametrize("output_type", ["median", "mode"])
-def test_local_point_output_types_also_use_the_estimator(monkeypatch, output_type):
+def test_local_median_also_uses_the_estimator(monkeypatch):
     seen: Dict = {}
     client = _local_client_with_fake(monkeypatch, seen)
     preds = client.predict(
-        _XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]], output_type=output_type
+        _XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]], output_type="median"
     )
-    assert seen["predict"]["output_type"] == output_type
+    assert seen["predict"]["output_type"] == "median"
     assert preds == [0.0, 1.0]
 
 

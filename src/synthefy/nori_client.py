@@ -139,13 +139,12 @@ def _resolve_local_variant(model: Optional[str]) -> Optional[str]:
 
 DEFAULT_TASK = "regression"
 
-# What ``predict`` returns from the model's predictive distribution. These names and
-# their meanings mirror ``synthefy_nori.NoriRegressor.predict``'s ``output_type``
-# exactly, so the argument means the same thing whether a call runs locally or
-# against the hosted endpoint.
+# What ``predict`` returns from the model's predictive distribution. Shared names
+# have the same meanings as ``synthefy_nori.NoriRegressor.predict``'s
+# ``output_type``, so a selector behaves consistently locally and remotely.
 #   point         -> one value per query row (a summary of the distribution)
 #   distribution  -> the quantile function itself (prediction intervals, CRPS, ...)
-_POINT_OUTPUT_TYPES = ("mean", "median", "mode")
+_POINT_OUTPUT_TYPES = ("mean", "median")
 _DISTRIBUTION_OUTPUT_TYPES = ("quantiles", "full")
 _OUTPUT_TYPES = _POINT_OUTPUT_TYPES + _DISTRIBUTION_OUTPUT_TYPES
 DEFAULT_OUTPUT_TYPE = "mean"
@@ -1302,16 +1301,16 @@ class SynthefyNoriClient:
             label, else ``"prediction"``) and indexed by ``X_test``'s index when
             ``X_test`` is a pandas object, so predictions join straight back.
             Default is plain ``list``/``dict``.
-        output_type : {"mean", "median", "mode", "quantiles", "full"}, default "mean"
-            What to return from the model's predictive distribution — the same
-            selector, with the same meanings, as
+        output_type : {"mean", "median", "quantiles", "full"}, default "mean"
+            What to return from the model's predictive distribution. Shared
+            selectors have the same meanings as
             ``synthefy_nori.NoriRegressor.predict``:
 
             - ``"mean"`` (default) — the distribution mean, one value per query
               row. Optimal for squared error / R², and byte-for-byte the
               behavior of earlier client versions.
-            - ``"median"`` / ``"mode"`` — the distribution median (MAE-optimal)
-              or mode, one value per query row.
+            - ``"median"`` — the distribution median (MAE-optimal), one value
+              per query row.
             - ``"quantiles"`` — **prediction intervals**: the predictive
               quantiles at the levels in ``quantiles=``. Returns
               ``(n_levels, n_query)`` — level-major, so
@@ -1425,7 +1424,7 @@ class SynthefyNoriClient:
         Returns
         -------
         list of float, or pandas.Series if ``as_pandas=True``
-            For a point ``output_type`` (``"mean"``/``"median"``/``"mode"``):
+            For a point ``output_type`` (``"mean"``/``"median"``):
             one predicted value per row of ``X_test``.
         list of list of float, or pandas.DataFrame if ``as_pandas=True``
             For ``output_type="quantiles"``: the quantiles as
@@ -1447,7 +1446,7 @@ class SynthefyNoriClient:
             column has unsupported ``timedelta`` dtype; if a non-DataFrame input
             contains non-numeric values; if ``categorical_encoding`` is not one
             of ``"ordinal"``/``"onehot"``; if featurization leaves no usable
-            columns; if ``output_type`` is not one of the five names, or
+            columns; if ``output_type`` is not one of the four names, or
             ``quantiles`` is missing/empty/outside ``(0, 1)`` for
             ``output_type="quantiles"``, or is passed with a different
             ``output_type``, or is combined with
@@ -1610,6 +1609,19 @@ class SynthefyNoriClient:
                     'pip install -U "synthefy[local]".'
                 )
             init_kwargs["model"] = self._local_variant
+        if request.memory_policy is not None:
+            if not _local_memory_policy_available():
+                raise ImportError(
+                    "memory_policy= requires synthefy-nori >= 0.13.0 (the serving-memory policy). "
+                    'Upgrade with: pip install -U "synthefy[local]".'
+                )
+            # NoriRegressor belongs to another package and expects its own MemoryPolicy
+            # class (or a plain input), not this client's equivalent pydantic class.
+            init_kwargs["memory_policy"] = (
+                request.memory_policy
+                if isinstance(request.memory_policy, str)
+                else request.memory_policy.model_dump(exclude_unset=True)
+            )
         regressor = regressor_cls(**init_kwargs)
         regressor.fit(request.X_train, request.y_train)
         return regressor.predict(
@@ -1663,7 +1675,7 @@ class SynthefyNoriClient:
         categorical_levels: Optional[VectorLike] = None,
     ) -> List[float]:
         if output_type != DEFAULT_OUTPUT_TYPE:
-            # "median"/"mode" are point outputs but still need the estimator API
+            # "median" is a point output but still needs the estimator API
             # (see _local_regressor_predict). Discretization cannot reach here:
             # _validate_output_type rejects that combination up front.
             return _as_float_list(
