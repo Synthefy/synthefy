@@ -916,8 +916,53 @@ def _shape_full(
     }
 
 
-def _widen_text_columns(X_train, X_test, text_columns, svd_dim, embedder,
-                        max_cardinality):
+def _resolve_text_device(device: Optional[str]) -> str:
+    """Resolve the device for a named sentence encoder.
+
+    ``None`` and ``"auto"`` prefer a CUDA device (including PyTorch ROCm
+    builds), then Apple MPS, and otherwise use CPU. An explicit PyTorch device
+    string such as ``"cpu"`` or ``"cuda:1"`` is returned unchanged.
+    """
+    if device not in (None, "auto"):
+        if not isinstance(device, str) or not device.strip():
+            raise ValueError(
+                "text_device must be 'auto', None, or a non-empty PyTorch "
+                "device string such as 'cpu', 'cuda', 'cuda:1', or 'mps'."
+            )
+        return device
+
+    try:
+        import torch
+    except (ImportError, OSError):
+        return "cpu"
+
+    cuda = getattr(torch, "cuda", None)
+    try:
+        if cuda is not None and cuda.is_available():
+            return "cuda"
+    except (AttributeError, RuntimeError):
+        pass
+
+    backends = getattr(torch, "backends", None)
+    mps = getattr(backends, "mps", None)
+    try:
+        if mps is not None and mps.is_available():
+            return "mps"
+    except (AttributeError, RuntimeError):
+        pass
+
+    return "cpu"
+
+
+def _widen_text_columns(
+    X_train,
+    X_test,
+    text_columns,
+    svd_dim,
+    embedder,
+    max_cardinality,
+    text_device,
+):
     """Embed free-text columns client-side, returning widened numeric frames.
 
     Uses ``synthefy_nori``'s ``MultimodalPreprocessor`` to turn the named text
@@ -942,6 +987,7 @@ def _widen_text_columns(X_train, X_test, text_columns, svd_dim, embedder,
     mm = MultimodalPreprocessor(
         text_columns, svd_dim=svd_dim, embedder=embedder,
         max_cardinality=max_cardinality,
+        device=_resolve_text_device(text_device),
     )
     Xtr = mm.fit_transform(X_train)   # numeric ndarray (numeric + categorical + text-SVD)
     Xte = mm.transform(X_test)
@@ -1168,6 +1214,7 @@ class SynthefyNoriClient:
         text_columns: Optional[Sequence[str]] = None,
         svd_dim: Optional[int] = 128,
         embedder: str = "minilm",
+        text_device: Optional[str] = "auto",
         discretize: Optional[str] = None,
         categorical_levels: Optional[VectorLike] = None,
         memory_policy: Optional[MemoryPolicyInput] = None,
@@ -1278,6 +1325,13 @@ class SynthefyNoriClient:
         embedder : str, default "minilm"
             Sentence-encoder short name (e.g. ``"minilm"``, ``"qwen4b"``) for
             ``text_columns``. Ignored when ``text_columns`` is None.
+        text_device : str or None, default "auto"
+            Device for a named sentence encoder used by ``text_columns``.
+            ``"auto"`` (and ``None``) prefers CUDA/ROCm, then Apple MPS, and
+            falls back to CPU. Pass an explicit PyTorch device string such as
+            ``"cpu"`` or ``"cuda:1"`` to override selection. Ignored when
+            ``text_columns`` is None or ``embedder`` is a callable/preloaded
+            encoder object, which controls its own placement.
         discretize : str or None, optional
             Declare a categorical/ordinal **target** (a 1–5 rating, a count, a
             quality score) and pick the strategy that maps each prediction
@@ -1412,7 +1466,7 @@ class SynthefyNoriClient:
             # (works identically for local / remote / dedicated backends).
             X_train, X_test = _widen_text_columns(
                 X_train, X_test, list(text_columns), svd_dim, embedder,
-                max_categorical_cardinality,
+                max_categorical_cardinality, text_device,
             )
         request = _build_nori_request(
             X_train, y_train, X_test, task,

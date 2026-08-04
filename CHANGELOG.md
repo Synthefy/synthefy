@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [6.2.2]
 
+### Changed
+
+- `SynthefyNoriClient.predict(text_columns=...)` now runs named sentence encoders
+  on CUDA/ROCm when available, then Apple MPS, with CPU as the fallback. Pass the
+  new `text_device=` argument to override automatic selection.
+
 ### Fixed
 
 - Kept the hosted Nori wire contract aligned with the server: missing feature cells are sent
