@@ -32,9 +32,8 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 import httpx
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, ConfigDict
-
-from synthefy.nori_data_models import MemoryPolicyInput, MemoryReport
+from synthefy.data_models import NoriPredictRequest, NoriPredictResponse
+from synthefy.nori_data_models import MemoryPolicyInput
 from synthefy.api_client import (
     APIConnectionError,
     APITimeoutError,
@@ -163,97 +162,6 @@ DEFAULT_AUTH_SCHEME: AuthScheme = "Bearer"
 # arrays, or pandas DataFrames/Series (all coerced to plain numeric arrays).
 MatrixLike = Union[Sequence[Sequence[float]], np.ndarray, pd.DataFrame]
 VectorLike = Union[Sequence[float], np.ndarray, pd.Series, pd.DataFrame]
-
-
-class NoriPredictRequest(BaseModel):
-    """Request payload for a Synthefy Nori prediction.
-
-    Mirrors the hosted inference contract exactly::
-
-        {"X_train": [[...], ...], "y_train": [...], "X_test": [[...], ...],
-         "task": "regression"}
-
-    Parameters
-    ----------
-    X_train : List[List[float]]
-        Labeled context rows. Shape ``(n_context, n_features)``.
-    y_train : List[float]
-        Target value for each context row. Length ``n_context``.
-    X_test : List[List[float]]
-        Query rows to predict. Shape ``(n_query, n_features)``.
-    task : str, default "regression"
-        The prediction task. Currently only ``"regression"`` is supported.
-    memory_policy : str or dict, optional
-        Serving-memory policy, at parity with the local package's
-        ``NoriRegressor(memory_policy=...)``: a preset name (``"exact"``,
-        ``"max_context"``, ``"off"``) or an object of policy fields. Omitted from
-        the wire payload entirely when unset, so a request that does not use it is
-        byte-for-byte what it always was.
-    output_type : str or None, optional
-        What to return from the predictive distribution (``"mean"``,
-        ``"median"``, ``"quantiles"``, ``"full"``). ``None`` means
-        "the server default", which is ``"mean"``; it is **omitted from the
-        request body** so the default request is byte-for-byte what earlier
-        client versions sent.
-    quantiles : List[float] or None, optional
-        Tau levels in ``(0, 1)`` for ``output_type="quantiles"``, in the caller's
-        order. Omitted from the body when ``None``.
-    """
-
-    # validate_assignment so `request.memory_policy = {...}` is COERCED into MemoryPolicy the
-    # same way the constructor would. Without it, assignment after construction silently
-    # bypasses validation and leaves a raw dict behind -- the field would claim a type it does
-    # not hold, and the serialisation below would fail on it.
-    model_config = ConfigDict(validate_assignment=True)
-
-    X_train: List[List[float]]
-    y_train: List[float]
-    X_test: List[List[float]]
-    task: str = DEFAULT_TASK
-    memory_policy: Optional[MemoryPolicyInput] = None
-    output_type: Optional[str] = None
-    quantiles: Optional[List[float]] = None
-
-
-class NoriPredictResponse(BaseModel):
-    """Response payload from a Synthefy Nori prediction.
-
-    Parameters
-    ----------
-    task : str
-        The task echoed back by the server (e.g. ``"regression"``).
-    predictions : List[float]
-        One point prediction per row of ``X_test``: the summary named by the
-        request's ``output_type``, or the distribution mean when a
-        distribution output (``"quantiles"``/``"full"``) was requested.
-    memory_report : dict, optional
-        Present only when the request set ``memory_policy``: what the server actually did
-        about it. See :attr:`SynthefyNoriClient.last_memory_report`.
-    output_type : str or None, optional
-        The output type the server actually honored. A deployment that predates
-        distribution output omits this field, which is how the client detects
-        that its ``output_type`` was silently ignored (see
-        :meth:`SynthefyNoriClient._predict_remote`) instead of handing back
-        means labeled as something else.
-    quantiles : List[List[float]] or None, optional
-        The predictive quantile function, **one row per query row**:
-        ``(n_query, K)`` ascending values in original-``y`` units. For
-        ``output_type="quantiles"`` ``K`` is the number of requested levels (in
-        the requested order, not sorted); for ``"full"`` it is the checkpoint's
-        whole quantile bank. Present only when a distribution output was
-        requested. Entries are nullable because JSON has no ``NaN``: the server
-        sends ``null`` for a non-finite value and the client maps it back to
-        ``NaN``.
-    taus : List[float] or None, optional
-        The ``K`` quantile levels matching ``quantiles``' columns.
-    """
-
-    task: str
-    predictions: List[float]
-    memory_report: Optional[MemoryReport] = None
-    output_type: Optional[str] = None
-    quantiles: Optional[List[List[Optional[float]]]] = None
-    taus: Optional[List[float]] = None
 
 
 def _frame_columns(arr: Any) -> Optional[List[Any]]:
@@ -696,9 +604,9 @@ def _build_nori_request(
         raise ValueError("task must be a non-empty string")
 
     return NoriPredictRequest(
-        X_train=X_train_arr.tolist(),
+        X_train=_nullable_matrix(X_train_arr),
         y_train=y_train_arr.tolist(),
-        X_test=X_test_arr.tolist(),
+        X_test=_nullable_matrix(X_test_arr),
         task=task,
         # Left as None for the default so the serialized body carries neither
         # field (see _predict_remote's exclude_none dump).
@@ -710,6 +618,14 @@ def _build_nori_request(
 def _as_float_list(values: Any) -> List[float]:
     """Coerce a prediction result (list or numpy array) into a flat ``list[float]``."""
     return np.asarray(values, dtype=float).reshape(-1).tolist()
+
+
+def _nullable_matrix(values: "np.ndarray") -> List[List[Optional[float]]]:
+    """Encode non-finite feature cells as standards-compliant JSON nulls."""
+    return [
+        [None if not np.isfinite(value) else float(value) for value in row]
+        for row in values
+    ]
 
 
 def _local_available() -> bool:
@@ -1755,13 +1671,7 @@ class SynthefyNoriClient:
         # sending null -- the hosted schema declares a preset name or an object, never null.
         # The distribution fields are likewise omitted when unset so the default request stays
         # byte-for-byte compatible with deployments that predate them.
-        payload = request.model_dump(exclude={"memory_policy"}, exclude_none=True)
-        if request.memory_policy is not None:
-            payload["memory_policy"] = (
-                request.memory_policy
-                if isinstance(request.memory_policy, str)
-                else request.memory_policy.model_dump(exclude_unset=True)
-            )
+        payload = request.to_wire()
         if self.model is not None:
             payload["model"] = self.model
 
@@ -1820,7 +1730,7 @@ class SynthefyNoriClient:
             timeout=timeout,
             extra_headers=extra_headers,
         )
-        return parsed.predictions
+        return _as_float_list(parsed.predictions)
 
     def _predict_remote_distribution(
         self,

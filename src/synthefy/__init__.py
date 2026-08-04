@@ -5,13 +5,13 @@ from synthefy.nori_data_models import (
     MemoryPolicy,
     MemoryReport,
 )
-from synthefy.nori_client import (
-    SynthefyNoriClient,
+from synthefy.data_models import (
     NoriPredictRequest,
     NoriPredictResponse,
 )
+from synthefy.nori_client import SynthefyNoriClient
 
-__version__ = "6.2.1"
+__version__ = "6.2.2"
 
 __all__ = [
     "MEMORY_PRESETS",
