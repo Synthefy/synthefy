@@ -1305,6 +1305,48 @@ def test_local_mode_without_discretize_sends_no_extra_kwargs(monkeypatch):
     assert client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE) == [1.0]
 
 
+def test_local_mode_preserves_degradation_warning_and_message(monkeypatch):
+    class LocalDegradationWarning(UserWarning):
+        pass
+
+    message = "Nori: SVD fit failed -> passthrough of all 400 raw columns"
+
+    def degraded_predict(X_train, y_train, X_test, *, task=None):
+        warnings.warn(message, LocalDegradationWarning)
+        return [1.0]
+
+    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: degraded_predict)
+    client = SynthefyNoriClient(mode="local", model=None)
+
+    with pytest.warns(LocalDegradationWarning, match="SVD fit failed") as caught:
+        assert client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE) == [1.0]
+
+    assert str(caught[0].message) == message
+
+
+def test_local_mode_preserves_strict_degradation_error_and_message(monkeypatch):
+    class LocalDegradationWarning(UserWarning):
+        pass
+
+    message = "Nori: SVD transform failed -> a single all-zero column"
+
+    def degraded_predict(X_train, y_train, X_test, *, task=None):
+        warnings.warn(message, LocalDegradationWarning)
+        return [1.0]
+
+    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: degraded_predict)
+    client = SynthefyNoriClient(mode="local", model=None)
+
+    with warnings.catch_warnings():
+        # synthefy_nori.strict_pipeline(SvdFallbackWarning) uses this same standard-library
+        # filter mechanism. The client must not catch, wrap, or rewrite the resulting exception.
+        warnings.simplefilter("error", LocalDegradationWarning)
+        with pytest.raises(LocalDegradationWarning, match="SVD transform failed") as caught:
+            client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
+
+    assert str(caught.value) == message
+
+
 def test_local_discretize_needs_newer_synthefy_nori(monkeypatch):
     monkeypatch.setattr(
         "synthefy.nori_client._load_local_predict", lambda: (lambda *a, **k: [1.0])
