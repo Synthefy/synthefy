@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.2.1]
+
+### Changed
+
+- Raised the `local` extra floor to `synthefy-nori>=0.13.1`, ensuring
+  `pip install "synthefy[local]"` includes the release where recoverable SVD
+  fallbacks emit `SvdFallbackWarning` instead of silently changing the pipeline.
+  The client preserves the warning category/message and strict-mode exception.
+
 ## [6.2.0]
 
 ### Added

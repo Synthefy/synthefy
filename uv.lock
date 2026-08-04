@@ -3381,7 +3381,7 @@ wheels = [
 
 [[package]]
 name = "synthefy"
-version = "6.2.0"
+version = "6.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -3418,7 +3418,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.20.0" },
     { name = "pandas", specifier = ">=1.3.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "synthefy-nori", marker = "extra == 'local'", specifier = ">=0.10.0" },
+    { name = "synthefy-nori", marker = "extra == 'local'", specifier = ">=0.13.1" },
     { name = "synthefy-nori", extras = ["text"], marker = "extra == 'text'", specifier = ">=0.12.0" },
 ]
 provides-extras = ["local", "text"]
@@ -3433,7 +3433,7 @@ dev = [
 
 [[package]]
 name = "synthefy-nori"
-version = "0.12.1"
+version = "0.13.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "einops" },
@@ -3447,6 +3447,7 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas", version = "3.0.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pydantic" },
     { name = "scikit-learn", version = "1.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.10.*'" },
     { name = "scikit-learn", version = "1.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -3457,9 +3458,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/41/ea/44483d35752b58599aa804799a0e7b3629714e1870733b8b3fea9c6b8b04/synthefy_nori-0.12.1.tar.gz", hash = "sha256:ca59d7853260f6a5ad6fb32d1d16711122076be54156a59530d69190c407825b", size = 295513, upload-time = "2026-07-27T22:23:43.503Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c4/45/ed0dd2b1aa1f5c290a7f8588ec3ffadc2751e01c08f2bc189511415cf7bf/synthefy_nori-0.13.1.tar.gz", hash = "sha256:5cb9fbf0a22c70b92d8ca90f46e7b398c5a6e62066ed98343f49712daef78b72", size = 375305, upload-time = "2026-08-04T03:46:36.401Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ec/4c/b237f7b651229dfb6178a1f285c6acddd9ebfa3ad1e567788ca24b70300a/synthefy_nori-0.12.1-py3-none-any.whl", hash = "sha256:0f712111999d5533db312c30b0e1801db959443cf9bef183e45b17061806e641", size = 285340, upload-time = "2026-07-27T22:23:42.128Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/b9/53e31e97ae0635a2d837422a4600bf84bb4c482e597867b8f2d92be43da7/synthefy_nori-0.13.1-py3-none-any.whl", hash = "sha256:f4b3173304d9c7b2ef21d1947e68a89e03182d0fecd6a84607c08b37915dc06d", size = 328716, upload-time = "2026-08-04T03:46:34.672Z" },
 ]
 
 [package.optional-dependencies]
