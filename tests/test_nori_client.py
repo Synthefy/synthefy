@@ -30,6 +30,7 @@ from synthefy.nori_client import (
     GATEWAY_ENDPOINT,
     NORI_VARIANTS,
     _is_thinking_model,
+    _nullable_matrix,
     _resolve_remote_levels,
     _snap_to_levels,
 )
@@ -637,6 +638,12 @@ def test_as_pandas_with_non_pandas_inputs_uses_defaults():
 # --------------------------------------------------------------------------- #
 # NaN / missing values are forwarded for server-side imputation (not rejected)
 # --------------------------------------------------------------------------- #
+
+
+def test_nullable_matrix_vectorizes_non_finite_cells():
+    values = np.array([[1.0, np.nan, np.inf, -np.inf]])
+
+    assert _nullable_matrix(values) == [[1.0, None, None, None]]
 
 
 def test_nan_is_sent_to_the_server_as_json_null():

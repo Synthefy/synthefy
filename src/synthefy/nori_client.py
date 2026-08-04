@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 import httpx
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 from synthefy.data_models import NoriPredictRequest, NoriPredictResponse
 from synthefy.nori_data_models import MemoryPolicyInput
 from synthefy.api_client import (
@@ -620,12 +621,11 @@ def _as_float_list(values: Any) -> List[float]:
     return np.asarray(values, dtype=float).reshape(-1).tolist()
 
 
-def _nullable_matrix(values: "np.ndarray") -> List[List[Optional[float]]]:
-    """Encode non-finite feature cells as standards-compliant JSON nulls."""
-    return [
-        [None if not np.isfinite(value) else float(value) for value in row]
-        for row in values
-    ]
+def _nullable_matrix(
+    values: NDArray[np.floating],
+) -> List[List[Optional[float]]]:
+    """Encode non-finite feature cells as JSON-compatible nulls."""
+    return np.where(np.isfinite(values), values, None).tolist()
 
 
 def _local_available() -> bool:
