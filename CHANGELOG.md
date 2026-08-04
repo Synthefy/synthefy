@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.2.2]
+
+### Fixed
+
+- Kept the hosted Nori wire contract aligned with the server: missing feature cells are sent
+  as JSON `null` and nullable predictions are converted back to `NaN`.
+- Moved `NoriPredictRequest` and `NoriPredictResponse` to `synthefy.data_models`, while
+  preserving their package-level and `synthefy.nori_client` import paths.
+- Centralized request serialization in `NoriPredictRequest.to_wire()` so the client and
+  serving contract tests preserve the same optional-field and partial-policy semantics.
+
 ## [6.2.1]
 
 ### Changed

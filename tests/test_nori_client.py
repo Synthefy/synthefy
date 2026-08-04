@@ -19,23 +19,33 @@ import pandas as pd
 import pytest
 from synthefy import (
     SynthefyNoriClient,
-    NoriPredictRequest,
-    NoriPredictResponse,
 )
 from synthefy.api_client import (
     AuthenticationError,
     BadRequestError,
     InternalServerError,
 )
+from synthefy.data_models import NoriPredictRequest, NoriPredictResponse
 from synthefy.nori_client import (
     GATEWAY_ENDPOINT,
     NORI_VARIANTS,
     _is_thinking_model,
+    _nullable_matrix,
     _resolve_remote_levels,
     _snap_to_levels,
 )
 
 Handler = Callable[[httpx.Request], httpx.Response]
+
+
+def test_nori_models_are_canonical_data_models_with_compatible_exports():
+    from synthefy import NoriPredictRequest as PublicRequest
+    from synthefy import NoriPredictResponse as PublicResponse
+    from synthefy.nori_client import NoriPredictRequest as ClientRequest
+    from synthefy.nori_client import NoriPredictResponse as ClientResponse
+
+    assert PublicRequest is ClientRequest is NoriPredictRequest
+    assert PublicResponse is ClientResponse is NoriPredictResponse
 
 
 def _attach_mock(client: SynthefyNoriClient, handler: Handler) -> None:
@@ -47,7 +57,7 @@ def _attach_mock(client: SynthefyNoriClient, handler: Handler) -> None:
     )
 
 
-def _ok_handler(predictions: List[float], capture: Dict) -> Handler:
+def _ok_handler(predictions: List[Optional[float]], capture: Dict) -> Handler:
     def handler(request: httpx.Request) -> httpx.Response:
         capture["path"] = request.url.path
         capture["headers"] = request.headers
@@ -89,6 +99,17 @@ def test_predict_returns_predictions_and_sends_expected_request():
     assert body["task"] == "regression"
     # The chosen size resolves to its gateway slug in the body.
     assert body["model"] == "synthefy/nori-30m"
+
+
+def test_null_prediction_returns_as_nan():
+    client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
+    _attach_mock(client, _ok_handler([None], {}))
+
+    predictions = client.predict(
+        X_train=[[0.0], [1.0]], y_train=[0.0, 1.0], X_test=[[2.0]]
+    )
+
+    assert len(predictions) == 1 and math.isnan(predictions[0])
 
 
 def test_predict_accepts_numpy_arrays():
@@ -192,7 +213,7 @@ def test_non_numeric_columns_are_ordinal_encoded_by_default():
     assert capture["body"]["X_test"] == [[3.0, 0.0], [4.0, -1.0]]
 
 
-def test_ordinal_missing_categorical_is_forwarded_as_nan():
+def test_ordinal_missing_categorical_is_forwarded_as_null():
     capture: Dict = {}
     client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
@@ -203,9 +224,9 @@ def test_ordinal_missing_categorical_is_forwarded_as_nan():
         X_test=pd.DataFrame({"a": [5.0], "cat": ["x"]}),
     )
     sent = capture["body"]["X_train"]
-    # x=0, y=1; the missing row stays NaN for server-side imputation.
+    # x=0, y=1; the missing row is a JSON null for server-side imputation.
     assert sent[0] == [0.0, 0.0] and sent[2] == [2.0, 1.0]
-    assert math.isnan(sent[1][1])
+    assert sent[1][1] is None
     assert capture["body"]["X_test"] == [[5.0, 0.0]]
 
 
@@ -458,7 +479,7 @@ def test_integer_category_with_nan_does_not_crash():
     )
     sent = capture["body"]["X_train"]
     assert sent[0] == [1.0] and sent[1] == [2.0]
-    assert math.isnan(sent[2][0])  # NaN forwarded, not crashed
+    assert sent[2][0] is None  # standards-compliant missing value, not a NaN token
 
 
 def test_duplicate_column_names_raise():
@@ -619,22 +640,26 @@ def test_as_pandas_with_non_pandas_inputs_uses_defaults():
 # --------------------------------------------------------------------------- #
 
 
-def test_nan_is_forwarded_to_the_server():
+def test_nullable_matrix_vectorizes_non_finite_cells():
+    values = np.array([[1.0, np.nan, np.inf, -np.inf]])
+
+    assert _nullable_matrix(values) == [[1.0, None, None, None]]
+
+
+def test_nan_is_sent_to_the_server_as_json_null():
     capture: Dict = {}
     client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
 
-    # A missing value in any input must NOT raise; the model imputes it
-    # server-side. The NaN rides through to the request body unchanged.
+    # A missing value in any input must NOT raise; the model imputes it server-side.
     client.predict(
         X_train=pd.DataFrame({"a": [0.0, 1.0], "b": [1.0, np.nan]}),
         y_train=[1.0, 2.0],
         X_test=np.array([[2.0, 2.0]]),
     )
 
-    # json.loads parses the non-strict ``NaN`` token back to float('nan').
     sent = capture["body"]["X_train"]
-    assert math.isnan(sent[1][1])
+    assert sent[1][1] is None
 
 
 def test_model_none_omits_the_model_field():
@@ -924,13 +949,13 @@ def test_request_model_roundtrip():
 
 
 def test_request_model_omits_unset_distribution_fields_on_the_wire():
-    # The serialized body (exclude_none, as _post_predict dumps it) must stay
+    # The canonical wire serializer must stay
     # exactly what earlier client versions sent, so adding these fields cannot
     # change any existing request.
     req = NoriPredictRequest(
         X_train=[[1.0, 2.0]], y_train=[3.0], X_test=[[4.0, 5.0]]
     )
-    assert req.model_dump(exclude_none=True) == {
+    assert req.to_wire() == {
         "X_train": [[1.0, 2.0]],
         "y_train": [3.0],
         "X_test": [[4.0, 5.0]],
@@ -1599,6 +1624,12 @@ def test_the_request_model_accepts_both_shapes():
     assert coerced.cache_dtype == "int8"
     # ...and only the field that was set is carried, so the server's defaults still apply.
     assert coerced.model_dump(exclude_unset=True) == {"cache_dtype": "int8"}
+    assert NoriPredictRequest(
+        X_train=_X_TRAIN,
+        y_train=_Y_TRAIN,
+        X_test=_X_TEST,
+        memory_policy={"cache_dtype": "int8"},
+    ).to_wire()["memory_policy"] == {"cache_dtype": "int8"}
     # Unset by default, so the field cannot change an existing caller's payload.
     assert NoriPredictRequest(
         X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST
