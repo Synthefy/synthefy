@@ -12,6 +12,7 @@ import math
 import sys
 import types
 import warnings
+from io import BytesIO
 from pathlib import Path
 from typing import Optional, Callable, Dict, List
 
@@ -71,6 +72,186 @@ def _ok_handler(predictions: List[Optional[float]], capture: Dict) -> Handler:
         )
 
     return handler
+
+
+# --------------------------------------------------------------------------- #
+# AWS SageMaker mode -- signed transport (botocore Stubber, no network)
+# --------------------------------------------------------------------------- #
+
+
+def test_aws_factory_uses_argument_free_boto3_session(monkeypatch):
+    """The public transport must use boto3's chain, never accept/pass raw keys."""
+    from synthefy import nori_client as module
+
+    capture: Dict = {}
+
+    class FakeConfig:
+        def __init__(self, **kwargs):
+            capture["config"] = kwargs
+
+    class FakeRuntime:
+        def close(self):
+            capture["closed"] = True
+
+    runtime = FakeRuntime()
+
+    class FakeSession:
+        def __init__(self, *args, **kwargs):
+            capture["session_args"] = args
+            capture["session_kwargs"] = kwargs
+
+        def client(self, service_name, **kwargs):
+            capture["service_name"] = service_name
+            capture["client_kwargs"] = kwargs
+            return runtime
+
+    class FakeBoto3:
+        Session = FakeSession
+
+    monkeypatch.setattr(module, "_load_aws_sdk", lambda: (FakeBoto3, FakeConfig))
+
+    client = SynthefyNoriClient(
+        mode="aws",
+        endpoint_name="nori-dev-123",
+        region_name="us-east-1",
+        timeout=75.0,
+        max_retries=3,
+    )
+
+    assert capture["session_args"] == ()
+    assert capture["session_kwargs"] == {}
+    assert capture["service_name"] == "sagemaker-runtime"
+    assert capture["client_kwargs"]["region_name"] == "us-east-1"
+    assert capture["config"]["read_timeout"] == 75.0
+    assert capture["config"]["retries"]["total_max_attempts"] == 4
+    client.close()
+    assert capture["closed"] is True
+
+
+def test_aws_predict_invokes_named_endpoint_with_canonical_body(monkeypatch):
+    import boto3
+    from botocore.response import StreamingBody
+    from botocore.stub import Stubber
+    from synthefy import nori_client as module
+
+    runtime = boto3.client(
+        "sagemaker-runtime",
+        region_name="us-east-1",
+        aws_access_key_id="unit-test",
+        aws_secret_access_key="unit-test",
+    )
+    response_body = json.dumps(
+        {"task": "regression", "predictions": [10.0, 20.0]}
+    ).encode("utf-8")
+    request_body = json.dumps(
+        {
+            "X_train": [[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
+            "y_train": [1.0, 1.0, 2.0],
+            "X_test": [[2.0, 2.0], [3.0, 3.0]],
+            "task": "regression",
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    stubber = Stubber(runtime)
+    stubber.add_response(
+        "invoke_endpoint",
+        {
+            "Body": StreamingBody(BytesIO(response_body), len(response_body)),
+            "ContentType": "application/json",
+        },
+        {
+            "EndpointName": "nori-dev-123",
+            "ContentType": "application/json",
+            "Accept": "application/json",
+            "Body": request_body,
+        },
+    )
+    monkeypatch.setattr(
+        module, "_create_sagemaker_runtime_client", lambda **_kwargs: runtime
+    )
+
+    with stubber:
+        client = SynthefyNoriClient(
+            mode="aws", endpoint_name="nori-dev-123", region_name="us-east-1"
+        )
+        predictions = client.predict(
+            X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
+            y_train=[1.0, 1.0, 2.0],
+            X_test=[[2.0, 2.0], [3.0, 3.0]],
+        )
+        assert predictions == [10.0, 20.0]
+        stubber.assert_no_pending_responses()
+
+
+def test_aws_model_error_preserves_original_container_status(monkeypatch):
+    from botocore.exceptions import ClientError
+    from synthefy import nori_client as module
+
+    class FailingRuntime:
+        def invoke_endpoint(self, **_kwargs):
+            raise ClientError(
+                {
+                    "Error": {"Code": "ModelError", "Message": "wrapped"},
+                    "OriginalStatusCode": 400,
+                    "OriginalMessage": "invalid Nori request",
+                    "LogStreamArn": "arn:aws:logs:us-east-1:123:log-stream/test",
+                    "ResponseMetadata": {"RequestId": "aws-request-123"},
+                },
+                "InvokeEndpoint",
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        module,
+        "_create_sagemaker_runtime_client",
+        lambda **_kwargs: FailingRuntime(),
+    )
+    client = SynthefyNoriClient(mode="aws", endpoint_name="nori-dev-123")
+
+    with pytest.raises(BadRequestError) as caught:
+        client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
+
+    assert str(caught.value) == "invalid Nori request"
+    assert caught.value.status_code == 400
+    assert caught.value.request_id == "aws-request-123"
+    assert caught.value.response_body["error"]["log_stream_arn"].endswith(
+        "log-stream/test"
+    )
+
+
+def test_aws_constructor_and_predict_reject_transport_mismatches(monkeypatch):
+    from synthefy import nori_client as module
+
+    class FakeRuntime:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        module,
+        "_create_sagemaker_runtime_client",
+        lambda **_kwargs: FakeRuntime(),
+    )
+
+    with pytest.raises(ValueError, match="endpoint_name is required"):
+        SynthefyNoriClient(mode="aws")
+    with pytest.raises(ValueError, match="model is not used"):
+        SynthefyNoriClient(mode="aws", endpoint_name="nori-dev", model="nori-30m")
+    with pytest.raises(ValueError, match="api_key is not used"):
+        SynthefyNoriClient(mode="aws", endpoint_name="nori-dev", api_key="secret")
+
+    client = SynthefyNoriClient(mode="aws", endpoint_name="nori-dev")
+    with pytest.raises(ValueError, match="extra_headers"):
+        client.predict(
+            [[0.0], [1.0]], [0.0, 1.0], [[2.0]], extra_headers={"x-test": "no"}
+        )
+    with pytest.raises(ValueError, match="per-prediction timeout"):
+        client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]], timeout=60)
+
+    monkeypatch.setattr(module, "SAGEMAKER_MAX_BODY_BYTES", 1)
+    with pytest.raises(ValueError, match="exceeding InvokeEndpoint"):
+        client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
 
 
 # --------------------------------------------------------------------------- #

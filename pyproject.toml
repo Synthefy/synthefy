@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "synthefy"
-version = "6.2.2"
+version = "6.3.0"
 description = "Python client for the Synthefy API: time-series forecasting and Nori in-context tabular regression"
 readme = "README.md"
 license = {text = "MIT"}
@@ -48,6 +48,9 @@ local = ["synthefy-nori>=0.13.1"]
 # MultimodalPreprocessor + sentence-transformers to widen text into numeric SVD
 # features before the request. Needs the version that ships text_features.
 text = ["synthefy-nori[text]>=0.12.0"]
+# Signed Amazon SageMaker endpoint invocation. boto3 resolves credentials from
+# its standard chain; the public client deliberately accepts no raw AWS keys.
+aws = ["boto3>=1.34.0,<2.0.0"]
 
 [project.urls]
 Homepage = "https://synthefy.com"
@@ -69,6 +72,7 @@ exclude = [
 
 [dependency-groups]
 dev = [
+    "boto3>=1.34.0,<2.0.0",
     "build>=1.3.0",
     "twine>=6.1.0",
     "pytest>=8.3.2",

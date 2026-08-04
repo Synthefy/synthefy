@@ -12,10 +12,12 @@ This module is self-contained and does not depend on the forecasting client
 package-wide exception types and HTTP error handling from
 :mod:`synthefy.api_client` so that errors behave consistently across the SDK.
 
-A single :class:`SynthefyNoriClient` runs predictions in one of three modes,
+A single :class:`SynthefyNoriClient` runs predictions in one of four modes,
 selected with the ``mode`` constructor argument:
 
 - ``"remote"`` (default) -- calls the hosted Baseten endpoint over HTTPS.
+- ``"aws"`` -- invokes a named Amazon SageMaker endpoint with AWS Signature V4,
+  using boto3's standard credential chain.
 - ``"local"`` -- runs the same prediction in-process via the optional
   ``synthefy-nori`` package (``pip install "synthefy[local]"``), no network and
   no API key.
@@ -24,6 +26,7 @@ selected with the ``mode`` constructor argument:
 """
 
 import importlib.util
+import json
 import os
 import time
 import warnings
@@ -149,8 +152,12 @@ _DISTRIBUTION_OUTPUT_TYPES = ("quantiles", "full")
 _OUTPUT_TYPES = _POINT_OUTPUT_TYPES + _DISTRIBUTION_OUTPUT_TYPES
 DEFAULT_OUTPUT_TYPE = "mean"
 
-Mode = Literal["remote", "local", "auto"]
-_VALID_MODES = ("remote", "local", "auto")
+Mode = Literal["remote", "aws", "local", "auto"]
+_VALID_MODES = ("remote", "aws", "local", "auto")
+
+# SageMaker Runtime's InvokeEndpoint request-body limit. Check it locally so a
+# caller gets a deterministic error before signing or sending a paid request.
+SAGEMAKER_MAX_BODY_BYTES = 6_291_456
 
 # Authorization header scheme for remote requests. The Baseten inference *gateway* accepts only
 # ``Bearer``, which is why it is the default. ``Api-Key`` exists for a caller who points
@@ -163,6 +170,47 @@ DEFAULT_AUTH_SCHEME: AuthScheme = "Bearer"
 # arrays, or pandas DataFrames/Series (all coerced to plain numeric arrays).
 MatrixLike = Union[Sequence[Sequence[float]], np.ndarray, pd.DataFrame]
 VectorLike = Union[Sequence[float], np.ndarray, pd.Series, pd.DataFrame]
+
+
+def _load_aws_sdk() -> Tuple[Any, Any]:
+    """Load the optional AWS SDK, returning ``(boto3, botocore.Config)``."""
+    try:
+        import boto3
+        from botocore.config import Config
+    except ImportError as exc:  # pragma: no cover - exercised without the extra
+        raise ImportError(
+            "AWS SageMaker mode needs the AWS extra: install "
+            "`pip install \"synthefy[aws]\"`."
+        ) from exc
+    return boto3, Config
+
+
+def _create_sagemaker_runtime_client(
+    *,
+    region_name: Optional[str],
+    timeout: float,
+    max_retries: int,
+    user_agent: str,
+) -> Any:
+    """Create a SageMaker Runtime client through boto3's credential chain.
+
+    Deliberately constructs an argument-free ``Session``: environment variables,
+    shared config/credentials, web identity (including GitHub OIDC), ECS/EC2 role
+    credentials, and SSO profiles retain boto3's normal precedence. The public
+    client never accepts raw AWS access keys.
+    """
+    boto3, Config = _load_aws_sdk()
+    config = Config(
+        connect_timeout=timeout,
+        read_timeout=timeout,
+        retries={"mode": "standard", "total_max_attempts": max_retries + 1},
+        user_agent_extra=user_agent,
+    )
+    return boto3.Session().client(
+        "sagemaker-runtime",
+        region_name=region_name,
+        config=config,
+    )
 
 
 def _frame_columns(arr: Any) -> Optional[List[Any]]:
@@ -1011,6 +1059,9 @@ class SynthefyNoriClient:
       Requires an API key (``api_key`` argument or the
       ``SYNTHEFY_NORI_API_KEY`` environment variable), sent as
       ``Authorization: <auth_scheme> <key>`` (``Bearer`` by default).
+    - ``"aws"``: invoke a named Amazon SageMaker real-time endpoint through
+      boto3. Requests are SigV4-signed using boto3's standard credential chain;
+      install the optional dependency with ``pip install "synthefy[aws]"``.
     - ``"local"``: run in-process via the optional ``synthefy-nori`` package
       (``pip install "synthefy[local]"``). No network and no API key.
     - ``"auto"``: use ``"local"`` if ``synthefy-nori`` is installed, otherwise
@@ -1031,18 +1082,20 @@ class SynthefyNoriClient:
         the ``SYNTHEFY_NORI_API_KEY`` environment variable. A
         :class:`ValueError` is raised if neither is set when remote mode is in
         effect.
-    mode : {"remote", "local", "auto"}, default "remote"
+    mode : {"remote", "aws", "local", "auto"}, default "remote"
         How predictions run. See above.
     timeout : float, default 300.0
-        Per-request timeout in seconds (remote mode).
+        Per-request timeout in seconds (remote and AWS modes). AWS mode applies
+        it when constructing the boto3 client; per-call overrides are not supported.
     max_retries : int, default 2
         Number of retries for transient errors (timeouts, connection errors,
-        429 and 5xx responses) with exponential backoff (remote mode).
+        429 and 5xx responses). Remote mode uses exponential backoff; AWS mode
+        configures botocore's standard retry policy with the same retry count.
     base_url : str, default GATEWAY_BASE_URL
         Base URL of the inference host (remote mode).
     endpoint : str, default GATEWAY_ENDPOINT
         Path appended to ``base_url`` for predictions (remote mode).
-    model : str or None, REQUIRED
+    model : str or None, REQUIRED except in AWS mode
         Which Nori to run — there is no default; every request names a size. Pass a friendly
         size selector — ``"nori-6m"`` (the ~6M base) or ``"nori-30m"`` (the ~29.2M variant) —
         which selects both the remote gateway deployment and, in local mode, the checkpoint. A
@@ -1057,13 +1110,20 @@ class SynthefyNoriClient:
         passing one with ``mode="local"`` or ``mode="auto"`` raises :class:`ValueError` rather
         than silently running the base model — use ``mode="remote"``. Likewise a selector with no
         local checkpoint (an unknown/custom slug) raises in local mode instead of falling back to
-        the base model.
+        the base model. Do not pass ``model`` in AWS mode: the named SageMaker
+        endpoint already identifies the deployed model.
     auth_scheme : {"Bearer", "Api-Key"}, default "Bearer"
         HTTP ``Authorization`` scheme prefixed to the API key (remote mode). The
         inference gateway requires ``"Bearer"``; ``"Api-Key"`` is only for a
         caller-supplied ``base_url`` pointing at a host that expects that scheme.
     user_agent : str or None, optional
-        Custom ``User-Agent`` header (remote mode).
+        Custom ``User-Agent`` value (remote and AWS modes).
+    endpoint_name : str or None, optional
+        SageMaker endpoint name. Required when ``mode="aws"`` and invalid in
+        every other mode.
+    region_name : str or None, optional
+        AWS region for SageMaker. If omitted in AWS mode, boto3 resolves it from
+        the standard environment/shared-config chain.
 
     Attributes
     ----------
@@ -1094,6 +1154,12 @@ class SynthefyNoriClient:
     Run the same prediction locally (no API key, needs ``synthefy[local]``):
 
     >>> client = SynthefyNoriClient(mode="local", model="nori-30m")  # doctest: +SKIP
+
+    Invoke a named SageMaker endpoint with ambient AWS credentials:
+
+    >>> client = SynthefyNoriClient(  # doctest: +SKIP
+    ...     mode="aws", endpoint_name="nori-dev", region_name="us-east-1"
+    ... )
     """
 
     def __init__(
@@ -1108,6 +1174,8 @@ class SynthefyNoriClient:
         model: Any = _MODEL_REQUIRED,
         auth_scheme: AuthScheme = DEFAULT_AUTH_SCHEME,
         user_agent: Optional[str] = None,
+        endpoint_name: Optional[str] = None,
+        region_name: Optional[str] = None,
     ) -> None:
         if mode not in _VALID_MODES:
             raise ValueError(
@@ -1117,6 +1185,24 @@ class SynthefyNoriClient:
             raise ValueError(
                 f"auth_scheme must be one of {_VALID_AUTH_SCHEMES}; "
                 f"got {auth_scheme!r}"
+            )
+        if mode == "aws":
+            if model is not _MODEL_REQUIRED:
+                raise ValueError(
+                    "model is not used in mode='aws'; the SageMaker endpoint "
+                    "already identifies the deployed model"
+                )
+            model = None
+            if api_key is not None:
+                raise ValueError(
+                    "api_key is not used in mode='aws'; boto3 resolves and "
+                    "SigV4-signs with the standard AWS credential chain"
+                )
+            if not endpoint_name or not endpoint_name.strip():
+                raise ValueError("endpoint_name is required when mode='aws'")
+        elif endpoint_name is not None or region_name is not None:
+            raise ValueError(
+                "endpoint_name and region_name are only valid when mode='aws'"
             )
         if model is _MODEL_REQUIRED:
             raise ValueError(
@@ -1144,6 +1230,8 @@ class SynthefyNoriClient:
         self.max_retries = max_retries
         self.base_url = base_url
         self.endpoint = endpoint
+        self.endpoint_name = endpoint_name
+        self.region_name = region_name
         # self.model is the gateway model id sent in the remote body: a friendly name maps to its
         # slug, a raw slug or None passes through. In local mode we additionally resolve -- and
         # validate -- the local checkpoint selector, which raises for a selector that has no local
@@ -1152,9 +1240,12 @@ class SynthefyNoriClient:
         if mode == "local":
             self._local_variant = _resolve_local_variant(model)
         self.auth_scheme = auth_scheme
-        self.user_agent = (
-            user_agent or f"synthefy-python httpx/{httpx.__version__}"
+        self.user_agent = user_agent or (
+            "synthefy-python"
+            if mode == "aws"
+            else f"synthefy-python httpx/{httpx.__version__}"
         )
+        self._aws_client: Optional[Any] = None
 
         if mode == "remote":
             if api_key is None:
@@ -1169,6 +1260,15 @@ class SynthefyNoriClient:
             self.client: Optional[httpx.Client] = httpx.Client(
                 base_url=self.base_url
             )
+        elif mode == "aws":
+            self.api_key = None
+            self.client = None
+            self._aws_client = _create_sagemaker_runtime_client(
+                region_name=self.region_name,
+                timeout=self.timeout,
+                max_retries=self.max_retries,
+                user_agent=self.user_agent,
+            )
         else:  # local
             self.api_key = api_key  # unused in local mode; may be None
             self.client = None
@@ -1182,7 +1282,7 @@ class SynthefyNoriClient:
         #: Worth reading, because the rung is decided by the replica's free VRAM rather than
         #: by the request -- it is not knowable from the client side.
         #:
-        #: **Remote mode only.** In local mode the policy IS honoured, but no report is
+        #: **Hosted modes only (remote/AWS).** In local mode the policy IS honoured, but no report is
         #: available: the client goes through ``synthefy_nori.predict``, which builds an
         #: estimator internally and discards it, and the report lives on that estimator. Use
         #: ``NoriRegressor`` directly and read ``memory_report_`` if you need it locally.
@@ -1199,6 +1299,11 @@ class SynthefyNoriClient:
         if self.client is not None:
             try:
                 self.client.close()
+            except Exception:
+                pass
+        if self._aws_client is not None:
+            try:
+                self._aws_client.close()
             except Exception:
                 pass
 
@@ -1288,7 +1393,7 @@ class SynthefyNoriClient:
               own mean, which can differ slightly from ``output_type="mean"``:
               the point path runs the model's augmentation (Yeo-Johnson)
               ensemble and the quantile bank deliberately does not. Inherited
-              from ``NoriRegressor``, so it is the same in either mode.
+              from ``NoriRegressor``, so it is the same in every mode.
 
             Quantiles come back in original-``y`` units, sorted to a valid
             (monotone) quantile function per row. Everything other than
@@ -1375,7 +1480,7 @@ class SynthefyNoriClient:
             not the model -- is what exhausts GPU memory on a big table. This decides what
             to do about it. Omit it for defaults that suit almost every request.
 
-            Works in both modes. Remote, the policy is validated server-side and what it
+            Works in every mode. Remote/AWS, the policy is validated server-side and what it
             actually did comes back in :attr:`last_memory_report`; an incoherent policy is
             rejected before any inference is paid for. Local, it needs
             ``synthefy-nori >= 0.13.0`` and raises :class:`ImportError` with an upgrade
@@ -1388,10 +1493,11 @@ class SynthefyNoriClient:
             the cached path at all.
         timeout : float or None, optional
             Override the client timeout for this request (remote mode only;
-            ignored in local mode).
+            ignored in local mode and rejected in AWS mode, where timeout is
+            fixed on the boto3 client at construction).
         extra_headers : dict of str to str, optional
             Additional HTTP headers to send with the request (remote mode only;
-            ignored in local mode).
+            ignored in local mode and rejected in AWS mode).
 
         Returns
         -------
@@ -1428,7 +1534,9 @@ class SynthefyNoriClient:
             empty/non-finite), or if the hosted deployment does not serve the
             requested ``output_type`` (it echoes back the type it honored, so an
             ignored ``output_type`` raises here instead of silently returning
-            means — use local mode, or a deployment with distribution support).
+            means — use local mode, or a deployment with distribution support);
+            or if HTTP-only ``extra_headers``/per-call ``timeout`` are passed in
+            AWS mode.
         ImportError
             In local mode, if the optional ``synthefy-nori`` package is not
             installed (with guidance to ``pip install "synthefy[local]"``), or
@@ -1458,6 +1566,16 @@ class SynthefyNoriClient:
         # Validate the output contract first: a bad output_type/quantiles pair is
         # caught before the expensive steps below (loading a sentence encoder for
         # text_columns, a checkpoint, or a paid network round-trip).
+        if self.mode == "aws" and extra_headers is not None:
+            raise ValueError(
+                "extra_headers is only valid for HTTP remote mode; SageMaker "
+                "requests are SigV4-signed by boto3"
+            )
+        if self.mode == "aws" and timeout is not None:
+            raise ValueError(
+                "per-prediction timeout is not supported in mode='aws'; set "
+                "timeout when constructing SynthefyNoriClient"
+            )
         quantile_levels = _validate_output_type(
             output_type,
             quantiles,
@@ -1466,7 +1584,7 @@ class SynthefyNoriClient:
         if text_columns:
             # Embed free-text columns client-side into numeric SVD features, then
             # send the widened numeric matrix through the normal request path
-            # (works identically for local / remote / dedicated backends).
+            # (works identically for local / remote / AWS backends).
             X_train, X_test = _widen_text_columns(
                 X_train, X_test, list(text_columns), svd_dim, embedder,
                 max_categorical_cardinality, text_device,
@@ -1486,18 +1604,22 @@ class SynthefyNoriClient:
         # Distribution output is shaped separately: it is not one value per query
         # row, so it does not flow through the point-prediction path below.
         if output_type in _DISTRIBUTION_OUTPUT_TYPES:
-            q_by_row, taus, mean = (
-                self._predict_local_distribution(
+            if self.mode == "local":
+                q_by_row, taus, mean = self._predict_local_distribution(
                     request, output_type=output_type, quantile_levels=quantile_levels
                 )
-                if self.mode == "local"
-                else self._predict_remote_distribution(
+            elif self.mode == "aws":
+                q_by_row, taus, mean = self._predict_aws_distribution(
+                    request,
+                    output_type=output_type,
+                )
+            else:
+                q_by_row, taus, mean = self._predict_remote_distribution(
                     request,
                     output_type=output_type,
                     timeout=timeout,
                     extra_headers=extra_headers,
                 )
-            )
             if output_type == "quantiles":
                 return _shape_quantiles(
                     q_by_row,
@@ -1524,12 +1646,18 @@ class SynthefyNoriClient:
                 remote_levels = _resolve_remote_levels(
                     request.y_train, discretize, categorical_levels
                 )
-            predictions = self._predict_remote(
-                request,
-                output_type=output_type,
-                timeout=timeout,
-                extra_headers=extra_headers,
-            )
+            if self.mode == "aws":
+                predictions = self._predict_aws(
+                    request,
+                    output_type=output_type,
+                )
+            else:
+                predictions = self._predict_remote(
+                    request,
+                    output_type=output_type,
+                    timeout=timeout,
+                    extra_headers=extra_headers,
+                )
             if remote_levels is not None:
                 predictions = _snap_to_levels(predictions, remote_levels)
         if as_pandas:
@@ -1704,8 +1832,138 @@ class SynthefyNoriClient:
         return _as_float_list(result)
 
     # ------------------------------------------------------------------ #
-    # Remote mode
+    # Hosted transports (Baseten HTTP and AWS SageMaker)
     # ------------------------------------------------------------------ #
+
+    def _parse_predict_response(
+        self,
+        request: NoriPredictRequest,
+        *,
+        output_type: str,
+        response_data: Dict[str, Any],
+    ) -> NoriPredictResponse:
+        """Validate a response shared by both hosted transports."""
+        parsed = NoriPredictResponse(**response_data)
+        if request.memory_policy is not None:
+            # The capability handshake. A deployment that predates `memory_policy` ignores the field
+            # and answers with default-memory predictions that are numerically valid, so
+            # nothing in `predictions` reveals that the policy was dropped. The server echoes
+            # `memory_report` precisely so this is detectable -- refuse to let a caller believe
+            # a policy took effect when it did not.
+            if parsed.memory_report is None:
+                raise ValueError(
+                    "memory_policy= was sent but the deployment did not report back on it, which "
+                    "means it was ignored: the predictions are valid but the policy had no "
+                    "effect. The endpoint is most likely running a build from before "
+                    "memory_policy= was supported. Omit memory_policy= to use the deployment's defaults."
+                )
+            # Validated through MemoryReport, exposed as a dict: the library's own
+            # memory_report_ is a dict, and `report["rung"]` is how it is read.
+            self.last_memory_report = parsed.memory_report.model_dump()
+        if output_type != DEFAULT_OUTPUT_TYPE and parsed.output_type != output_type:
+            honored = (
+                "omitted the output_type field entirely, so it predates "
+                "distribution output"
+                if parsed.output_type is None
+                else f"honored output_type={parsed.output_type!r} instead"
+            )
+            raise ValueError(
+                f"The hosted deployment did not serve output_type={output_type!r}: "
+                f"it {honored}. Such a deployment answers with the distribution "
+                f"mean, which is indistinguishable from a real {output_type!r} "
+                "result, so this is raised rather than returning means as if they "
+                'were what you asked for. Use local mode (pip install '
+                '"synthefy[local]", then mode="local"), or point at a deployment '
+                "that serves distribution output."
+            )
+        return parsed
+
+    def _invoke_aws_predict(
+        self,
+        request: NoriPredictRequest,
+        *,
+        output_type: str,
+    ) -> NoriPredictResponse:
+        """Invoke the configured SageMaker endpoint with a SigV4-signed request."""
+        assert self._aws_client is not None
+        assert self.endpoint_name is not None
+        body = json.dumps(
+            request.to_wire(), separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+        if len(body) > SAGEMAKER_MAX_BODY_BYTES:
+            raise ValueError(
+                "The SageMaker request body is "
+                f"{len(body):,} bytes, exceeding InvokeEndpoint's "
+                f"{SAGEMAKER_MAX_BODY_BYTES:,}-byte limit. Reduce the context/query rows."
+            )
+        try:
+            response = self._aws_client.invoke_endpoint(
+                EndpointName=self.endpoint_name,
+                ContentType="application/json",
+                Accept="application/json",
+                Body=body,
+            )
+        except Exception as exc:
+            # SageMaker wraps a non-2xx response from the inference container in
+            # ModelError (HTTP 424). Translate the original container status and
+            # message through the SDK's existing exception hierarchy. Credential,
+            # region, signing, throttling, and other AWS exceptions stay untouched.
+            aws_response = getattr(exc, "response", None)
+            error = aws_response.get("Error", {}) if isinstance(aws_response, dict) else {}
+            if error.get("Code") == "ModelError":
+                original_status = aws_response.get("OriginalStatusCode", 500)
+                try:
+                    status = int(original_status)
+                except (TypeError, ValueError):
+                    status = 500
+                if status < 400 or status > 599:
+                    status = 500
+                message = (
+                    aws_response.get("OriginalMessage")
+                    or error.get("Message")
+                    or "SageMaker endpoint returned a model error"
+                )
+                details = {
+                    "error": {
+                        "message": message,
+                        "code": "ModelError",
+                        "log_stream_arn": aws_response.get("LogStreamArn"),
+                    }
+                }
+                headers: Dict[str, str] = {}
+                metadata = aws_response.get("ResponseMetadata", {})
+                if metadata.get("RequestId"):
+                    headers["x-request-id"] = metadata["RequestId"]
+                _raise_for_status(httpx.Response(status, json=details, headers=headers))
+            raise
+
+        response_body = response["Body"]
+        if hasattr(response_body, "read"):
+            try:
+                raw = response_body.read()
+            finally:
+                response_body.close()
+        else:
+            raw = response_body
+        response_data = json.loads(raw)
+        if not isinstance(response_data, dict):
+            raise ValueError(
+                "SageMaker endpoint returned JSON that was not an object"
+            )
+        return self._parse_predict_response(
+            request,
+            output_type=output_type,
+            response_data=response_data,
+        )
+
+    def _predict_aws(
+        self,
+        request: NoriPredictRequest,
+        *,
+        output_type: str = DEFAULT_OUTPUT_TYPE,
+    ) -> List[float]:
+        parsed = self._invoke_aws_predict(request, output_type=output_type)
+        return _as_float_list(parsed.predictions)
 
     def _post_predict(
         self,
@@ -1738,40 +1996,11 @@ class SynthefyNoriClient:
             headers=self._headers(extra_headers=extra_headers),
             timeout=timeout,
         )
-        parsed = NoriPredictResponse(**response.json())
-        if request.memory_policy is not None:
-            # The capability handshake. A deployment that predates `memory_policy` ignores the field
-            # and answers with default-memory predictions that are numerically valid, so
-            # nothing in `predictions` reveals that the policy was dropped. The server echoes
-            # `memory_report` precisely so this is detectable -- refuse to let a caller believe
-            # a policy took effect when it did not.
-            if parsed.memory_report is None:
-                raise ValueError(
-                    "memory_policy= was sent but the deployment did not report back on it, which "
-                    "means it was ignored: the predictions are valid but the policy had no "
-                    "effect. The endpoint is most likely running a build from before "
-                    "memory_policy= was supported. Omit memory_policy= to use the deployment's defaults."
-                )
-            # Validated through MemoryReport, exposed as a dict: the library's own
-            # memory_report_ is a dict, and `report["rung"]` is how it is read.
-            self.last_memory_report = parsed.memory_report.model_dump()
-        if output_type != DEFAULT_OUTPUT_TYPE and parsed.output_type != output_type:
-            honored = (
-                "omitted the output_type field entirely, so it predates "
-                "distribution output"
-                if parsed.output_type is None
-                else f"honored output_type={parsed.output_type!r} instead"
-            )
-            raise ValueError(
-                f"The hosted deployment did not serve output_type={output_type!r}: "
-                f"it {honored}. Such a deployment answers with the distribution "
-                f"mean, which is indistinguishable from a real {output_type!r} "
-                "result, so this is raised rather than returning means as if they "
-                'were what you asked for. Use local mode (pip install '
-                '"synthefy[local]", then mode="local"), or point '
-                "base_url/endpoint at a deployment that serves distribution output."
-            )
-        return parsed
+        return self._parse_predict_response(
+            request,
+            output_type=output_type,
+            response_data=response.json(),
+        )
 
     def _predict_remote(
         self,
@@ -1810,6 +2039,29 @@ class SynthefyNoriClient:
             timeout=timeout,
             extra_headers=extra_headers,
         )
+        return self._parse_hosted_distribution(
+            request, parsed=parsed, output_type=output_type
+        )
+
+    def _predict_aws_distribution(
+        self,
+        request: NoriPredictRequest,
+        *,
+        output_type: str,
+    ) -> Tuple["np.ndarray", "np.ndarray", "np.ndarray"]:
+        parsed = self._invoke_aws_predict(request, output_type=output_type)
+        return self._parse_hosted_distribution(
+            request, parsed=parsed, output_type=output_type
+        )
+
+    def _parse_hosted_distribution(
+        self,
+        request: NoriPredictRequest,
+        *,
+        parsed: NoriPredictResponse,
+        output_type: str,
+    ) -> Tuple["np.ndarray", "np.ndarray", "np.ndarray"]:
+        """Normalize either hosted transport's quantile response."""
         if parsed.quantiles is None or parsed.taus is None:
             raise ValueError(
                 f"The hosted deployment echoed output_type={output_type!r} but "

@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.3.0]
+
+### Added
+
+- Added `SynthefyNoriClient(mode="aws", endpoint_name=..., region_name=...)` for
+  Amazon SageMaker real-time endpoints. It sends the same Nori request/response
+  contract through boto3 `InvokeEndpoint`, signed through boto3's standard AWS
+  credential chain; the public API accepts no raw AWS keys.
+- Added the optional `synthefy[aws]` dependency extra.
+- Added stubbed SageMaker Runtime tests for named-endpoint invocation, credential-
+  chain construction, transport argument guards, and preservation of a container's
+  original status/message from SageMaker `ModelError`.
+
+### Changed
+
+- Hosted response capability checks are now shared by the Baseten and SageMaker
+  transports, so distribution output and `memory_policy` cannot silently degrade on
+  either backend.
+- SageMaker requests fail locally before invocation when their encoded body exceeds
+  the `InvokeEndpoint` API limit.
+
 ## [6.2.2]
 
 ### Changed
