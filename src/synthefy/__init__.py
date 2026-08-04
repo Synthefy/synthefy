@@ -11,7 +11,7 @@ from synthefy.nori_client import (
     NoriPredictResponse,
 )
 
-__version__ = "6.2.0"
+__version__ = "6.2.1"
 
 __all__ = [
     "MEMORY_PRESETS",
