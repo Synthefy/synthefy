@@ -984,10 +984,13 @@ def _widen_text_columns(
             "text_columns needs the text extra: install `pip install "
             '"synthefy[text]"` (pulls synthefy-nori with sentence-transformers).'
         ) from e
+    resolved_text_device = (
+        _resolve_text_device(text_device) if isinstance(embedder, str) else None
+    )
     mm = MultimodalPreprocessor(
         text_columns, svd_dim=svd_dim, embedder=embedder,
         max_cardinality=max_cardinality,
-        device=_resolve_text_device(text_device),
+        device=resolved_text_device,
     )
     Xtr = mm.fit_transform(X_train)   # numeric ndarray (numeric + categorical + text-SVD)
     Xte = mm.transform(X_test)

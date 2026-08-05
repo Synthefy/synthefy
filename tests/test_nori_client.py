@@ -1502,6 +1502,34 @@ def _fake_embed(texts):
     return np.stack(out)
 
 
+class _FakePreloadedEncoder:
+    def encode(self, texts, **kwargs):
+        return _fake_embed(texts)
+
+
+@pytest.mark.parametrize(
+    "embedder",
+    [_fake_embed, _FakePreloadedEncoder()],
+    ids=["callable", "preloaded"],
+)
+def test_text_device_is_ignored_for_custom_encoder(embedder):
+    train = pd.DataFrame({"review": ["good", "bad", "great", "awful"]})
+    test = pd.DataFrame({"review": ["fine"]})
+
+    train_features, test_features = _widen_text_columns(
+        train,
+        test,
+        ["review"],
+        2,
+        embedder,
+        100,
+        "",
+    )
+
+    assert train_features.shape == (4, 2)
+    assert test_features.shape == (1, 2)
+
+
 def test_text_columns_embeds_client_side_and_sends_numeric():
     capture: Dict = {}
     client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
