@@ -87,6 +87,11 @@ class NoriPredictResponse(BaseModel):
         server-side non-finite result is represented as ``None`` on this wire
         model and converted back to ``NaN`` by
         :meth:`synthefy.nori_client.SynthefyNoriClient.predict`.
+    model : str or None, optional
+        The model identity that produced the response. SageMaker returns this so
+        the client can verify that a named endpoint served the requested model and
+        fail closed instead of returning valid-looking predictions from the wrong
+        model specification.
     memory_report : dict, optional
         Present only when the request set ``memory_policy``: what the server actually did
         about it. See
