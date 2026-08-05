@@ -5,13 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [6.2.2]
+## [6.2.3]
 
 ### Changed
 
 - `SynthefyNoriClient.predict(text_columns=...)` now runs named sentence encoders
   on CUDA/ROCm when available, then Apple MPS, with CPU as the fallback. Pass the
   new `text_device=` argument to override automatic selection.
+
+## [6.2.2]
 
 ### Fixed
 
