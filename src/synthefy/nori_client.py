@@ -75,16 +75,24 @@ NORI_VARIANTS = {
     "nori-30m": ("synthefy/nori-30m", "nori-30m"),
     "synthefy/nori-6m": ("synthefy/nori-6m", "nori-6m"),
     "synthefy/nori-30m": ("synthefy/nori-30m", "nori-30m"),
-    # Thinking (test-time compute) -- hosted-API only; local/auto is refused by the thinking guard.
-    # Only the medium budget is deployed today, so the bare name and "-medium" both route to it;
-    # add other budget tiers here when they ship.
-    "nori-30m-thinking": ("synthefy/nori-30m-thinking-medium", None),
+    # Thinking (test-time compute) -- hosted deployments only; local/auto is refused by the
+    # thinking guard. Each budget is a distinct deployment and must never alias another tier.
+    "nori-30m-thinking": ("synthefy/nori-30m-thinking", None),
     "nori-30m-thinking-medium": ("synthefy/nori-30m-thinking-medium", None),
+    "nori-30m-thinking-high": ("synthefy/nori-30m-thinking-high", None),
+    "synthefy/nori-30m-thinking": ("synthefy/nori-30m-thinking", None),
+    "synthefy/nori-30m-thinking-medium": ("synthefy/nori-30m-thinking-medium", None),
+    "synthefy/nori-30m-thinking-high": ("synthefy/nori-30m-thinking-high", None),
 }
 
 # Selectable model names for error messages, derived from NORI_VARIANTS so they stay current as
 # variants are added. Friendly names only (the "synthefy/..." raw slugs are aliases, not listed).
 _MODEL_NAMES = tuple(name for name in NORI_VARIANTS if "/" not in name)
+
+# SageMaker Marketplace publishes these exact named inference specifications. A SageMaker
+# endpoint is created from one specification; the client sends the same canonical name so the
+# container can fail closed if an endpoint and requested model do not match.
+SAGEMAKER_VARIANTS = tuple(_MODEL_NAMES)
 
 
 def _is_thinking_model(model: Optional[str]) -> bool:
@@ -110,6 +118,14 @@ def _resolve_variant(model: Optional[str]) -> tuple:
     if model is not None and model in NORI_VARIANTS:
         return NORI_VARIANTS[model]
     return model, None
+
+
+def _canonical_model_name(model: Optional[str]) -> Optional[str]:
+    """Return the canonical deployment name without the gateway namespace."""
+    gateway_model, _ = _resolve_variant(model)
+    if gateway_model is None:
+        return None
+    return gateway_model.removeprefix("synthefy/")
 
 
 def _resolve_local_variant(model: Optional[str]) -> Optional[str]:
@@ -152,8 +168,11 @@ _DISTRIBUTION_OUTPUT_TYPES = ("quantiles", "full")
 _OUTPUT_TYPES = _POINT_OUTPUT_TYPES + _DISTRIBUTION_OUTPUT_TYPES
 DEFAULT_OUTPUT_TYPE = "mean"
 
-Mode = Literal["remote", "aws", "local", "auto"]
-_VALID_MODES = ("remote", "aws", "local", "auto")
+Mode = Literal["remote", "local", "auto"]
+_VALID_MODES = ("remote", "local", "auto")
+
+Deployment = Literal["sagemaker"]
+_VALID_DEPLOYMENTS = ("sagemaker",)
 
 # SageMaker Runtime's InvokeEndpoint request-body limit. Check it locally so a
 # caller gets a deterministic error before signing or sending a paid request.
@@ -173,13 +192,13 @@ VectorLike = Union[Sequence[float], np.ndarray, pd.Series, pd.DataFrame]
 
 
 def _load_aws_sdk() -> Tuple[Any, Any]:
-    """Load the optional AWS SDK, returning ``(boto3, botocore.Config)``."""
+    """Load the optional AWS SDK only when a SageMaker deployment is selected."""
     try:
         import boto3
         from botocore.config import Config
     except ImportError as exc:  # pragma: no cover - exercised without the extra
         raise ImportError(
-            "AWS SageMaker mode needs the AWS extra: install "
+            "A SageMaker deployment needs the AWS extra: install "
             "`pip install \"synthefy[aws]\"`."
         ) from exc
     return boto3, Config
@@ -190,7 +209,7 @@ def _create_sagemaker_runtime_client(
     region_name: Optional[str],
     timeout: float,
     max_retries: int,
-    user_agent: str,
+    user_agent_extra: str,
 ) -> Any:
     """Create a SageMaker Runtime client through boto3's credential chain.
 
@@ -204,7 +223,7 @@ def _create_sagemaker_runtime_client(
         connect_timeout=timeout,
         read_timeout=timeout,
         retries={"mode": "standard", "total_max_attempts": max_retries + 1},
-        user_agent_extra=user_agent,
+        user_agent_extra=user_agent_extra,
     )
     return boto3.Session().client(
         "sagemaker-runtime",
@@ -1053,19 +1072,20 @@ class SynthefyNoriClient:
     rows are supplied alongside the query rows and one value per query row is
     returned in a single forward pass.
 
-    The ``mode`` argument selects how predictions run:
+    The ``mode`` argument selects local or Synthefy-hosted execution. The
+    ``deployment`` argument selects a customer-managed hosting transport:
 
     - ``"remote"`` (default): call the hosted Baseten endpoint over HTTPS.
       Requires an API key (``api_key`` argument or the
       ``SYNTHEFY_NORI_API_KEY`` environment variable), sent as
       ``Authorization: <auth_scheme> <key>`` (``Bearer`` by default).
-    - ``"aws"``: invoke a named Amazon SageMaker real-time endpoint through
-      boto3. Requests are SigV4-signed using boto3's standard credential chain;
-      install the optional dependency with ``pip install "synthefy[aws]"``.
     - ``"local"``: run in-process via the optional ``synthefy-nori`` package
       (``pip install "synthefy[local]"``). No network and no API key.
     - ``"auto"``: use ``"local"`` if ``synthefy-nori`` is installed, otherwise
       fall back to ``"remote"`` (which then requires an API key).
+    - ``deployment="sagemaker"``: invoke a named Amazon SageMaker endpoint
+      through boto3. Requests are SigV4-signed using boto3's standard credential
+      chain; install the optional dependency with ``pip install "synthefy[aws]"``.
 
     For remote mode, the client targets the Baseten inference *gateway*
     (``https://inference.baseten.co/predict``) and includes the chosen size slug (e.g.
@@ -1082,47 +1102,51 @@ class SynthefyNoriClient:
         the ``SYNTHEFY_NORI_API_KEY`` environment variable. A
         :class:`ValueError` is raised if neither is set when remote mode is in
         effect.
-    mode : {"remote", "aws", "local", "auto"}, default "remote"
+    mode : {"remote", "local", "auto"}, default "remote"
         How predictions run. See above.
+    deployment : {"sagemaker"} or None, optional
+        Customer-managed deployment transport. ``"sagemaker"`` invokes
+        ``endpoint_name`` with AWS credentials. It cannot be combined with local
+        or auto mode.
     timeout : float, default 300.0
-        Per-request timeout in seconds (remote and AWS modes). AWS mode applies
+        Per-request timeout in seconds (remote and SageMaker deployments). SageMaker applies
         it when constructing the boto3 client; per-call overrides are not supported.
     max_retries : int, default 2
         Number of retries for transient errors (timeouts, connection errors,
-        429 and 5xx responses). Remote mode uses exponential backoff; AWS mode
+        429 and 5xx responses). Remote mode uses exponential backoff; SageMaker
         configures botocore's standard retry policy with the same retry count.
     base_url : str, default GATEWAY_BASE_URL
         Base URL of the inference host (remote mode).
     endpoint : str, default GATEWAY_ENDPOINT
         Path appended to ``base_url`` for predictions (remote mode).
-    model : str or None, REQUIRED except in AWS mode
+    model : str or None, REQUIRED
         Which Nori to run — there is no default; every request names a size. Pass a friendly
         size selector — ``"nori-6m"`` (the ~6M base) or ``"nori-30m"`` (the ~29.2M variant) —
         which selects both the remote gateway deployment and, in local mode, the checkpoint. A
-        raw gateway slug (e.g. ``"synthefy/nori-30m"``) is also accepted verbatim, and ``None``
-        omits the ``model`` field from the body entirely (only useful with a caller-supplied
-        ``base_url`` that routes by URL). Omitting ``model``
-        entirely raises :class:`ValueError`. Selecting a variant in local mode requires a
+        raw gateway slug (e.g. ``"synthefy/nori-30m"``) is also accepted verbatim. Omitting
+        the argument raises :class:`ValueError`; an explicit ``None`` remains available for
+        backwards-compatible custom HTTP/local integrations, but is rejected for SageMaker,
+        where exact model identity is mandatory. Selecting a variant in local mode requires a
         synthefy-nori build with the ``model=`` selector.
-        Nori Thinking — the friendly names ``"nori-30m-thinking"`` / ``"nori-30m-thinking-medium"``
-        (only the medium budget is deployed today; both route to it), or the
-        ``"synthefy/nori-30m-thinking-medium"`` gateway slug — runs only on the hosted API:
+        Nori Thinking — ``"nori-30m-thinking"``, ``"nori-30m-thinking-medium"``, and
+        ``"nori-30m-thinking-high"`` — runs only on hosted deployments:
         passing one with ``mode="local"`` or ``mode="auto"`` raises :class:`ValueError` rather
         than silently running the base model — use ``mode="remote"``. Likewise a selector with no
         local checkpoint (an unknown/custom slug) raises in local mode instead of falling back to
-        the base model. Do not pass ``model`` in AWS mode: the named SageMaker
-        endpoint already identifies the deployed model.
+        the base model. SageMaker also requires the model name and verifies it
+        against the model specification used to create the endpoint.
     auth_scheme : {"Bearer", "Api-Key"}, default "Bearer"
         HTTP ``Authorization`` scheme prefixed to the API key (remote mode). The
         inference gateway requires ``"Bearer"``; ``"Api-Key"`` is only for a
         caller-supplied ``base_url`` pointing at a host that expects that scheme.
     user_agent : str or None, optional
-        Custom ``User-Agent`` value (remote and AWS modes).
+        Custom ``User-Agent`` value for HTTP remote mode. For SageMaker it is
+        appended to botocore's normal user agent for request attribution.
     endpoint_name : str or None, optional
-        SageMaker endpoint name. Required when ``mode="aws"`` and invalid in
-        every other mode.
+        SageMaker endpoint name. Required with ``deployment="sagemaker"`` and
+        invalid otherwise.
     region_name : str or None, optional
-        AWS region for SageMaker. If omitted in AWS mode, boto3 resolves it from
+        AWS region for SageMaker. If omitted, boto3 resolves it from
         the standard environment/shared-config chain.
 
     Attributes
@@ -1158,7 +1182,8 @@ class SynthefyNoriClient:
     Invoke a named SageMaker endpoint with ambient AWS credentials:
 
     >>> client = SynthefyNoriClient(  # doctest: +SKIP
-    ...     mode="aws", endpoint_name="nori-dev", region_name="us-east-1"
+    ...     deployment="sagemaker", model="nori-30m",
+    ...     endpoint_name="nori-30m-prod", region_name="us-east-1"
     ... )
     """
 
@@ -1167,6 +1192,7 @@ class SynthefyNoriClient:
         api_key: Optional[str] = None,
         *,
         mode: Mode = "remote",
+        deployment: Optional[Deployment] = None,
         timeout: float = 300.0,
         max_retries: int = 2,
         base_url: str = GATEWAY_BASE_URL,
@@ -1181,28 +1207,35 @@ class SynthefyNoriClient:
             raise ValueError(
                 f"mode must be one of {_VALID_MODES}; got {mode!r}"
             )
+        if deployment is not None and deployment not in _VALID_DEPLOYMENTS:
+            raise ValueError(
+                f"deployment must be one of {_VALID_DEPLOYMENTS} or None; "
+                f"got {deployment!r}"
+            )
         if auth_scheme not in _VALID_AUTH_SCHEMES:
             raise ValueError(
                 f"auth_scheme must be one of {_VALID_AUTH_SCHEMES}; "
                 f"got {auth_scheme!r}"
             )
-        if mode == "aws":
-            if model is not _MODEL_REQUIRED:
+        if deployment == "sagemaker":
+            if mode != "remote":
                 raise ValueError(
-                    "model is not used in mode='aws'; the SageMaker endpoint "
-                    "already identifies the deployed model"
+                    "deployment='sagemaker' cannot be combined with "
+                    f"mode={mode!r}; omit mode"
                 )
-            model = None
             if api_key is not None:
                 raise ValueError(
-                    "api_key is not used in mode='aws'; boto3 resolves and "
+                    "api_key is not used with deployment='sagemaker'; boto3 resolves and "
                     "SigV4-signs with the standard AWS credential chain"
                 )
             if not endpoint_name or not endpoint_name.strip():
-                raise ValueError("endpoint_name is required when mode='aws'")
+                raise ValueError(
+                    "endpoint_name is required with deployment='sagemaker'"
+                )
         elif endpoint_name is not None or region_name is not None:
             raise ValueError(
-                "endpoint_name and region_name are only valid when mode='aws'"
+                "endpoint_name and region_name are only valid with "
+                "deployment='sagemaker'"
             )
         if model is _MODEL_REQUIRED:
             raise ValueError(
@@ -1213,12 +1246,25 @@ class SynthefyNoriClient:
         if mode == "auto":
             mode = "local" if _local_available() else "remote"
         self.mode: str = mode
+        self.deployment = deployment
+
+        canonical_model = _canonical_model_name(model)
+        if deployment == "sagemaker" and canonical_model not in SAGEMAKER_VARIANTS:
+            raise ValueError(
+                "SageMaker model must name a published Nori inference specification; "
+                f"choose one of: {', '.join(SAGEMAKER_VARIANTS)}"
+            )
+        self._sagemaker_model = canonical_model
 
         # Nori Thinking runs only on the hosted API; refuse it in any non-remote mode (mode="local"
         # or mode="auto") instead of silently running the base model. Checked against the *requested*
         # mode so the guard is deterministic (it does not depend on whether synthefy-nori happens to
         # be installed, which is what mode="auto" resolves on).
-        if _is_thinking_model(model) and requested_mode != "remote":
+        if (
+            _is_thinking_model(model)
+            and deployment != "sagemaker"
+            and requested_mode != "remote"
+        ):
             raise ValueError(
                 f"model={model!r} is a Nori Thinking (test-time-compute) variant, which runs only "
                 f"on the hosted Synthefy API. Set mode='remote' with a Baseten API key to use it "
@@ -1240,14 +1286,20 @@ class SynthefyNoriClient:
         if mode == "local":
             self._local_variant = _resolve_local_variant(model)
         self.auth_scheme = auth_scheme
-        self.user_agent = user_agent or (
-            "synthefy-python"
-            if mode == "aws"
-            else f"synthefy-python httpx/{httpx.__version__}"
-        )
+        self.user_agent = user_agent or f"synthefy-python httpx/{httpx.__version__}"
+        self._aws_user_agent_extra = user_agent or "synthefy-python"
         self._aws_client: Optional[Any] = None
 
-        if mode == "remote":
+        if deployment == "sagemaker":
+            self.api_key = None
+            self.client = None
+            self._aws_client = _create_sagemaker_runtime_client(
+                region_name=self.region_name,
+                timeout=self.timeout,
+                max_retries=self.max_retries,
+                user_agent_extra=self._aws_user_agent_extra,
+            )
+        elif mode == "remote":
             if api_key is None:
                 api_key = os.getenv(NORI_API_KEY_ENV)
             if not api_key:
@@ -1259,15 +1311,6 @@ class SynthefyNoriClient:
             self.api_key: Optional[str] = api_key
             self.client: Optional[httpx.Client] = httpx.Client(
                 base_url=self.base_url
-            )
-        elif mode == "aws":
-            self.api_key = None
-            self.client = None
-            self._aws_client = _create_sagemaker_runtime_client(
-                region_name=self.region_name,
-                timeout=self.timeout,
-                max_retries=self.max_retries,
-                user_agent=self.user_agent,
             )
         else:  # local
             self.api_key = api_key  # unused in local mode; may be None
@@ -1480,7 +1523,7 @@ class SynthefyNoriClient:
             not the model -- is what exhausts GPU memory on a big table. This decides what
             to do about it. Omit it for defaults that suit almost every request.
 
-            Works in every mode. Remote/AWS, the policy is validated server-side and what it
+            Works in every mode. Remote/SageMaker, the policy is validated server-side and what it
             actually did comes back in :attr:`last_memory_report`; an incoherent policy is
             rejected before any inference is paid for. Local, it needs
             ``synthefy-nori >= 0.13.0`` and raises :class:`ImportError` with an upgrade
@@ -1492,12 +1535,12 @@ class SynthefyNoriClient:
             (~64 MiB) -- so lowering ``elements_budget`` is what lets a hosted caller reach
             the cached path at all.
         timeout : float or None, optional
-            Override the client timeout for this request (remote mode only;
-            ignored in local mode and rejected in AWS mode, where timeout is
-            fixed on the boto3 client at construction).
+            Override the client timeout for this request (remote mode only).
+            It is ignored with a warning for SageMaker, where timeout is fixed
+            on the boto3 client at construction.
         extra_headers : dict of str to str, optional
             Additional HTTP headers to send with the request (remote mode only;
-            ignored in local mode and rejected in AWS mode).
+            ignored in local mode and rejected for SageMaker deployments).
 
         Returns
         -------
@@ -1536,7 +1579,8 @@ class SynthefyNoriClient:
             ignored ``output_type`` raises here instead of silently returning
             means — use local mode, or a deployment with distribution support);
             or if HTTP-only ``extra_headers``/per-call ``timeout`` are passed in
-            AWS mode.
+            a SageMaker deployment. Per-call ``timeout`` is instead ignored
+            with a warning for SageMaker.
         ImportError
             In local mode, if the optional ``synthefy-nori`` package is not
             installed (with guidance to ``pip install "synthefy[local]"``), or
@@ -1566,15 +1610,17 @@ class SynthefyNoriClient:
         # Validate the output contract first: a bad output_type/quantiles pair is
         # caught before the expensive steps below (loading a sentence encoder for
         # text_columns, a checkpoint, or a paid network round-trip).
-        if self.mode == "aws" and extra_headers is not None:
+        if self.deployment == "sagemaker" and extra_headers is not None:
             raise ValueError(
                 "extra_headers is only valid for HTTP remote mode; SageMaker "
                 "requests are SigV4-signed by boto3"
             )
-        if self.mode == "aws" and timeout is not None:
-            raise ValueError(
-                "per-prediction timeout is not supported in mode='aws'; set "
-                "timeout when constructing SynthefyNoriClient"
+        if self.deployment == "sagemaker" and timeout is not None:
+            warnings.warn(
+                "Per-prediction timeout is ignored for SageMaker; boto3 applies "
+                "the timeout configured on SynthefyNoriClient.",
+                UserWarning,
+                stacklevel=2,
             )
         quantile_levels = _validate_output_type(
             output_type,
@@ -1608,7 +1654,7 @@ class SynthefyNoriClient:
                 q_by_row, taus, mean = self._predict_local_distribution(
                     request, output_type=output_type, quantile_levels=quantile_levels
                 )
-            elif self.mode == "aws":
+            elif self.deployment == "sagemaker":
                 q_by_row, taus, mean = self._predict_aws_distribution(
                     request,
                     output_type=output_type,
@@ -1646,7 +1692,7 @@ class SynthefyNoriClient:
                 remote_levels = _resolve_remote_levels(
                     request.y_train, discretize, categorical_levels
                 )
-            if self.mode == "aws":
+            if self.deployment == "sagemaker":
                 predictions = self._predict_aws(
                     request,
                     output_type=output_type,
@@ -1878,18 +1924,84 @@ class SynthefyNoriClient:
             )
         return parsed
 
-    def _invoke_aws_predict(
+    @staticmethod
+    def _raise_sagemaker_model_error(exc: Exception) -> None:
+        """Translate a SageMaker ModelError and re-raise every other SDK error."""
+        aws_response = getattr(exc, "response", None)
+        error = aws_response.get("Error", {}) if isinstance(aws_response, dict) else {}
+        if error.get("Code") != "ModelError":
+            raise exc
+        original_status = aws_response.get("OriginalStatusCode", 500)
+        try:
+            status = int(original_status)
+        except (TypeError, ValueError):
+            status = 500
+        if status < 400 or status > 599:
+            status = 500
+        message = (
+            aws_response.get("OriginalMessage")
+            or error.get("Message")
+            or "SageMaker endpoint returned a model error"
+        )
+        details = {
+            "error": {
+                "message": message,
+                "code": "ModelError",
+                "log_stream_arn": aws_response.get("LogStreamArn"),
+            }
+        }
+        headers: Dict[str, str] = {}
+        metadata = aws_response.get("ResponseMetadata", {})
+        if metadata.get("RequestId"):
+            headers["x-request-id"] = metadata["RequestId"]
+        _raise_for_status(httpx.Response(status, json=details, headers=headers))
+
+    @staticmethod
+    def _read_sagemaker_stream(event_stream: Any) -> bytes:
+        """Collect SageMaker event-stream payload parts and close the stream."""
+        chunks: List[bytes] = []
+        try:
+            for event in event_stream:
+                if "PayloadPart" in event:
+                    chunks.append(event["PayloadPart"].get("Bytes", b""))
+                    continue
+                if "ModelStreamError" in event:
+                    details = event["ModelStreamError"]
+                    raise RuntimeError(
+                        "SageMaker model stream failed: "
+                        f"{details.get('ErrorCode', 'unknown')}: "
+                        f"{details.get('Message', 'no message')}"
+                    )
+                if "InternalStreamFailure" in event:
+                    raise RuntimeError(
+                        "SageMaker response stream failed internally: "
+                        f"{event['InternalStreamFailure'].get('Message', 'no message')}"
+                    )
+        finally:
+            close = getattr(event_stream, "close", None)
+            if close is not None:
+                close()
+        return b"".join(chunks)
+
+    def _invoke_sagemaker_predict(
         self,
         request: NoriPredictRequest,
         *,
         output_type: str,
     ) -> NoriPredictResponse:
         """Invoke the configured SageMaker endpoint with a SigV4-signed request."""
-        assert self._aws_client is not None
-        assert self.endpoint_name is not None
-        body = json.dumps(
-            request.to_wire(), separators=(",", ":"), allow_nan=False
-        ).encode("utf-8")
+        if self._aws_client is None or self.endpoint_name is None:
+            raise RuntimeError(
+                "SageMaker transport is not initialized; construct the client with "
+                "deployment='sagemaker' and endpoint_name"
+            )
+        if self._sagemaker_model is None:
+            raise RuntimeError("SageMaker transport has no resolved model identity")
+        payload = request.to_wire()
+        payload["model"] = self._sagemaker_model
+        body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode(
+            "utf-8"
+        )
         if len(body) > SAGEMAKER_MAX_BODY_BYTES:
             raise ValueError(
                 "The SageMaker request body is "
@@ -1897,48 +2009,30 @@ class SynthefyNoriClient:
                 f"{SAGEMAKER_MAX_BODY_BYTES:,}-byte limit. Reduce the context/query rows."
             )
         try:
-            response = self._aws_client.invoke_endpoint(
-                EndpointName=self.endpoint_name,
-                ContentType="application/json",
-                Accept="application/json",
-                Body=body,
-            )
-        except Exception as exc:
-            # SageMaker wraps a non-2xx response from the inference container in
-            # ModelError (HTTP 424). Translate the original container status and
-            # message through the SDK's existing exception hierarchy. Credential,
-            # region, signing, throttling, and other AWS exceptions stay untouched.
-            aws_response = getattr(exc, "response", None)
-            error = aws_response.get("Error", {}) if isinstance(aws_response, dict) else {}
-            if error.get("Code") == "ModelError":
-                original_status = aws_response.get("OriginalStatusCode", 500)
-                try:
-                    status = int(original_status)
-                except (TypeError, ValueError):
-                    status = 500
-                if status < 400 or status > 599:
-                    status = 500
-                message = (
-                    aws_response.get("OriginalMessage")
-                    or error.get("Message")
-                    or "SageMaker endpoint returned a model error"
+            if _is_thinking_model(self._sagemaker_model):
+                response = self._aws_client.invoke_endpoint_with_response_stream(
+                    EndpointName=self.endpoint_name,
+                    ContentType="application/json",
+                    Accept="application/json",
+                    CustomAttributes="synthefy-response-stream=v1",
+                    Body=body,
                 )
-                details = {
-                    "error": {
-                        "message": message,
-                        "code": "ModelError",
-                        "log_stream_arn": aws_response.get("LogStreamArn"),
-                    }
-                }
-                headers: Dict[str, str] = {}
-                metadata = aws_response.get("ResponseMetadata", {})
-                if metadata.get("RequestId"):
-                    headers["x-request-id"] = metadata["RequestId"]
-                _raise_for_status(httpx.Response(status, json=details, headers=headers))
-            raise
+            else:
+                response = self._aws_client.invoke_endpoint(
+                    EndpointName=self.endpoint_name,
+                    ContentType="application/json",
+                    Accept="application/json",
+                    Body=body,
+                )
+        except Exception as exc:
+            # Credential, region, signing, and throttling exceptions stay as botocore errors.
+            self._raise_sagemaker_model_error(exc)
+            raise RuntimeError("unreachable")  # pragma: no cover
 
         response_body = response["Body"]
-        if hasattr(response_body, "read"):
+        if _is_thinking_model(self._sagemaker_model):
+            raw = self._read_sagemaker_stream(response_body)
+        elif hasattr(response_body, "read"):
             try:
                 raw = response_body.read()
             finally:
@@ -1949,6 +2043,29 @@ class SynthefyNoriClient:
         if not isinstance(response_data, dict):
             raise ValueError(
                 "SageMaker endpoint returned JSON that was not an object"
+            )
+        stream_error = response_data.get("error")
+        if isinstance(stream_error, dict) and "status_code" in stream_error:
+            status = int(stream_error.get("status_code", 500))
+            if status < 400 or status > 599:
+                status = 500
+            _raise_for_status(
+                httpx.Response(
+                    status,
+                    json={
+                        "error": {
+                            "message": stream_error.get(
+                                "message", "SageMaker streaming inference failed"
+                            )
+                        }
+                    },
+                )
+            )
+        actual_model = response_data.get("model")
+        if actual_model != self._sagemaker_model:
+            raise ValueError(
+                "SageMaker endpoint model identity mismatch: requested "
+                f"{self._sagemaker_model!r}, received {actual_model!r}"
             )
         return self._parse_predict_response(
             request,
@@ -1962,7 +2079,7 @@ class SynthefyNoriClient:
         *,
         output_type: str = DEFAULT_OUTPUT_TYPE,
     ) -> List[float]:
-        parsed = self._invoke_aws_predict(request, output_type=output_type)
+        parsed = self._invoke_sagemaker_predict(request, output_type=output_type)
         return _as_float_list(parsed.predictions)
 
     def _post_predict(
@@ -2049,7 +2166,7 @@ class SynthefyNoriClient:
         *,
         output_type: str,
     ) -> Tuple["np.ndarray", "np.ndarray", "np.ndarray"]:
-        parsed = self._invoke_aws_predict(request, output_type=output_type)
+        parsed = self._invoke_sagemaker_predict(request, output_type=output_type)
         return self._parse_hosted_distribution(
             request, parsed=parsed, output_type=output_type
         )

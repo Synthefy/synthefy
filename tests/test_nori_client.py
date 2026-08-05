@@ -75,7 +75,7 @@ def _ok_handler(predictions: List[Optional[float]], capture: Dict) -> Handler:
 
 
 # --------------------------------------------------------------------------- #
-# AWS SageMaker mode -- signed transport (botocore Stubber, no network)
+# AWS SageMaker deployment -- signed transport (botocore Stubber, no network)
 # --------------------------------------------------------------------------- #
 
 
@@ -111,7 +111,8 @@ def test_aws_factory_uses_argument_free_boto3_session(monkeypatch):
     monkeypatch.setattr(module, "_load_aws_sdk", lambda: (FakeBoto3, FakeConfig))
 
     client = SynthefyNoriClient(
-        mode="aws",
+        deployment="sagemaker",
+        model="nori-30m",
         endpoint_name="nori-dev-123",
         region_name="us-east-1",
         timeout=75.0,
@@ -141,7 +142,11 @@ def test_aws_predict_invokes_named_endpoint_with_canonical_body(monkeypatch):
         aws_secret_access_key="unit-test",
     )
     response_body = json.dumps(
-        {"task": "regression", "predictions": [10.0, 20.0]}
+        {
+            "task": "regression",
+            "model": "nori-30m",
+            "predictions": [10.0, 20.0],
+        }
     ).encode("utf-8")
     request_body = json.dumps(
         {
@@ -149,6 +154,7 @@ def test_aws_predict_invokes_named_endpoint_with_canonical_body(monkeypatch):
             "y_train": [1.0, 1.0, 2.0],
             "X_test": [[2.0, 2.0], [3.0, 3.0]],
             "task": "regression",
+            "model": "nori-30m",
         },
         separators=(",", ":"),
     ).encode("utf-8")
@@ -172,7 +178,10 @@ def test_aws_predict_invokes_named_endpoint_with_canonical_body(monkeypatch):
 
     with stubber:
         client = SynthefyNoriClient(
-            mode="aws", endpoint_name="nori-dev-123", region_name="us-east-1"
+            deployment="sagemaker",
+            model="nori-30m",
+            endpoint_name="nori-dev-123",
+            region_name="us-east-1",
         )
         predictions = client.predict(
             X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
@@ -181,6 +190,92 @@ def test_aws_predict_invokes_named_endpoint_with_canonical_body(monkeypatch):
         )
         assert predictions == [10.0, 20.0]
         stubber.assert_no_pending_responses()
+
+
+def test_sagemaker_thinking_uses_response_stream_and_checks_model(monkeypatch):
+    from synthefy import nori_client as module
+
+    capture: Dict = {}
+
+    class FakeEventStream:
+        def __iter__(self):
+            yield {"PayloadPart": {"Bytes": b" \n"}}
+            yield {
+                "PayloadPart": {
+                    "Bytes": json.dumps(
+                        {
+                            "task": "regression",
+                            "model": "nori-30m-thinking-high",
+                            "predictions": [3.0],
+                        }
+                    ).encode()
+                }
+            }
+
+        def close(self):
+            capture["closed"] = True
+
+    class FakeRuntime:
+        def invoke_endpoint_with_response_stream(self, **kwargs):
+            capture["request"] = kwargs
+            return {"Body": FakeEventStream()}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        module,
+        "_create_sagemaker_runtime_client",
+        lambda **_kwargs: FakeRuntime(),
+    )
+    client = SynthefyNoriClient(
+        deployment="sagemaker",
+        model="nori-30m-thinking-high",
+        endpoint_name="nori-thinking-high-prod",
+    )
+
+    predictions = client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
+
+    assert predictions == [3.0]
+    assert capture["request"]["EndpointName"] == "nori-thinking-high-prod"
+    assert capture["request"]["CustomAttributes"] == "synthefy-response-stream=v1"
+    assert json.loads(capture["request"]["Body"])["model"] == "nori-30m-thinking-high"
+    assert capture["closed"] is True
+
+
+def test_sagemaker_response_model_mismatch_fails_closed(monkeypatch):
+    from synthefy import nori_client as module
+
+    class FakeRuntime:
+        def invoke_endpoint(self, **_kwargs):
+            return {
+                "Body": BytesIO(
+                    json.dumps(
+                        {
+                            "task": "regression",
+                            "model": "nori-6m",
+                            "predictions": [2.0],
+                        }
+                    ).encode()
+                )
+            }
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        module,
+        "_create_sagemaker_runtime_client",
+        lambda **_kwargs: FakeRuntime(),
+    )
+    client = SynthefyNoriClient(
+        deployment="sagemaker",
+        model="nori-30m",
+        endpoint_name="wrong-model-endpoint",
+    )
+
+    with pytest.raises(ValueError, match="model identity mismatch"):
+        client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
 
 
 def test_aws_model_error_preserves_original_container_status(monkeypatch):
@@ -208,7 +303,11 @@ def test_aws_model_error_preserves_original_container_status(monkeypatch):
         "_create_sagemaker_runtime_client",
         lambda **_kwargs: FailingRuntime(),
     )
-    client = SynthefyNoriClient(mode="aws", endpoint_name="nori-dev-123")
+    client = SynthefyNoriClient(
+        deployment="sagemaker",
+        model="nori-30m",
+        endpoint_name="nori-dev-123",
+    )
 
     with pytest.raises(BadRequestError) as caught:
         client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
@@ -225,6 +324,19 @@ def test_aws_constructor_and_predict_reject_transport_mismatches(monkeypatch):
     from synthefy import nori_client as module
 
     class FakeRuntime:
+        def invoke_endpoint(self, **_kwargs):
+            return {
+                "Body": BytesIO(
+                    json.dumps(
+                        {
+                            "task": "regression",
+                            "model": "nori-30m",
+                            "predictions": [2.0],
+                        }
+                    ).encode()
+                )
+            }
+
         def close(self):
             pass
 
@@ -234,19 +346,30 @@ def test_aws_constructor_and_predict_reject_transport_mismatches(monkeypatch):
         lambda **_kwargs: FakeRuntime(),
     )
 
+    with pytest.raises(ValueError, match="model is required"):
+        SynthefyNoriClient(deployment="sagemaker", endpoint_name="nori-dev")
     with pytest.raises(ValueError, match="endpoint_name is required"):
-        SynthefyNoriClient(mode="aws")
-    with pytest.raises(ValueError, match="model is not used"):
-        SynthefyNoriClient(mode="aws", endpoint_name="nori-dev", model="nori-30m")
+        SynthefyNoriClient(deployment="sagemaker", model="nori-30m")
+    with pytest.raises(ValueError, match="published Nori inference specification"):
+        SynthefyNoriClient(
+            deployment="sagemaker", endpoint_name="nori-dev", model="custom"
+        )
     with pytest.raises(ValueError, match="api_key is not used"):
-        SynthefyNoriClient(mode="aws", endpoint_name="nori-dev", api_key="secret")
+        SynthefyNoriClient(
+            deployment="sagemaker",
+            endpoint_name="nori-dev",
+            model="nori-30m",
+            api_key="secret",
+        )
 
-    client = SynthefyNoriClient(mode="aws", endpoint_name="nori-dev")
+    client = SynthefyNoriClient(
+        deployment="sagemaker", endpoint_name="nori-dev", model="nori-30m"
+    )
     with pytest.raises(ValueError, match="extra_headers"):
         client.predict(
             [[0.0], [1.0]], [0.0, 1.0], [[2.0]], extra_headers={"x-test": "no"}
         )
-    with pytest.raises(ValueError, match="per-prediction timeout"):
+    with pytest.warns(UserWarning, match="Per-prediction timeout is ignored"):
         client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]], timeout=60)
 
     monkeypatch.setattr(module, "SAGEMAKER_MAX_BODY_BYTES", 1)
@@ -1342,9 +1465,9 @@ def test_thinking_model_raises_in_local_and_auto_modes(mode, model):
 @pytest.mark.parametrize(
     "friendly,slug",
     [
-        # Only the medium budget is deployed today; the bare name routes to it too.
-        ("nori-30m-thinking", "synthefy/nori-30m-thinking-medium"),
+        ("nori-30m-thinking", "synthefy/nori-30m-thinking"),
         ("nori-30m-thinking-medium", "synthefy/nori-30m-thinking-medium"),
+        ("nori-30m-thinking-high", "synthefy/nori-30m-thinking-high"),
     ],
 )
 def test_thinking_friendly_name_resolves_to_gateway_slug_remote(friendly, slug):

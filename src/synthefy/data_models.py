@@ -112,6 +112,7 @@ class NoriPredictResponse(BaseModel):
 
     task: str
     predictions: List[Optional[float]]
+    model: Optional[str] = None
     memory_report: Optional[MemoryReport] = None
     output_type: Optional[str] = None
     quantiles: Optional[List[List[Optional[float]]]] = None

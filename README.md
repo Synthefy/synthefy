@@ -425,7 +425,7 @@ The Nori client reuses the package's
   exponential backoff, then surface as `RateLimitError` / `InternalServerError` /
   `APITimeoutError` / `APIConnectionError`.
 
-### Amazon SageMaker Usage (`mode="aws"`)
+### Amazon SageMaker Usage (`deployment="sagemaker"`)
 
 Install the optional AWS transport and invoke a named real-time endpoint:
 
@@ -437,8 +437,9 @@ pip install "synthefy[aws]"
 from synthefy import SynthefyNoriClient
 
 client = SynthefyNoriClient(
-    mode="aws",
-    endpoint_name="nori-dev-123456",
+    deployment="sagemaker",
+    model="nori-30m",
+    endpoint_name="nori-30m-prod",
     region_name="us-east-1",
 )
 predictions = client.predict(
@@ -451,16 +452,18 @@ predictions = client.predict(
 The client creates an argument-free `boto3.Session()` and therefore uses
 boto3's standard credential chain: environment/shared config, web identity
 (including GitHub OIDC), container or instance roles, and SSO profiles. It does
-not accept AWS access keys. `model=` is omitted because the endpoint already
-identifies the deployed model; `endpoint_name=` is required. `auto` mode never
-selects AWS.
+not accept AWS access keys. `model=` and `endpoint_name=` are required: the
+endpoint selects the deployed model specification, while the request model is
+checked against it so a routing mistake fails closed. `auto` mode never selects
+SageMaker.
 
 SageMaker's request is the same Nori JSON contract used by the hosted transport,
 sent through `InvokeEndpoint` with `application/json`. Container errors retain
 their original status/message through the normal Synthefy exception hierarchy;
 AWS credential, signing, region, quota, and throttling errors remain native AWS
 SDK exceptions. Set request timeout/retries on the constructor. HTTP-only
-`extra_headers=` and per-call `timeout=` are rejected in AWS mode.
+`extra_headers=` are rejected for SageMaker. Per-call `timeout=` is ignored with
+a warning.
 
 ### Local Usage (`mode="local"`, Optional, No Network)
 
@@ -677,15 +680,17 @@ continuous mean is already optimal for those metrics.
 
 ### SynthefyNoriClient (Tabular Regression)
 
-- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None, endpoint_name=None, region_name=None)` — `model` is **required except in AWS mode** (`"nori-30m"` / `"nori-6m"`; `None` for a single-model HTTP endpoint of your own)
-  - `mode`: `"remote"` (hosted, default), `"aws"` (named SageMaker endpoint), `"local"` (in-process via
+- `SynthefyNoriClient(api_key=None, *, mode="remote", deployment=None, timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None, endpoint_name=None, region_name=None)` — the `model` argument is **required** and accepts the five released Nori variants. Explicit `None` remains a compatibility escape for custom HTTP/local integrations, but SageMaker requires an exact name.
+  - `mode`: `"remote"` (hosted, default), `"local"` (in-process via
     `synthefy-nori`), or `"auto"` (local if installed, else remote).
+  - `deployment="sagemaker"`: invoke a named SageMaker endpoint using the AWS
+    credential chain. It cannot be combined with local or auto mode.
   - `api_key` (remote mode) falls back to the `SYNTHEFY_NORI_API_KEY`
     environment variable. Not required in local mode.
   - Hosted Nori is reached by gateway slug — that is the path Synthefy meters,
     rate-limits and grants per key. To target a single-model endpoint you host
-    yourself, pass your own `base_url`/`endpoint` with `model=None`, which omits
-    `"model"` from the request body.
+    yourself, pass your own `base_url`/`endpoint`; an explicit `model=None` retains
+    the legacy URL-routed behavior.
 - `predict(X_train, y_train, X_test, task="regression", *, output_type="mean", quantiles=None, text_columns=None, svd_dim=128, embedder="minilm", text_device="auto", timeout=None, extra_headers=None) -> List[float]`
   - Returns one predicted value per row of `X_test`. `timeout`/`extra_headers`
     apply to remote mode only.
