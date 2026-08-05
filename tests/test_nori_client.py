@@ -9,6 +9,8 @@ import builtins
 import importlib.util
 import json
 import math
+import sys
+import types
 import warnings
 from pathlib import Path
 from typing import Optional, Callable, Dict, List
@@ -32,7 +34,9 @@ from synthefy.nori_client import (
     _is_thinking_model,
     _nullable_matrix,
     _resolve_remote_levels,
+    _resolve_text_device,
     _snap_to_levels,
+    _widen_text_columns,
 )
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -1401,6 +1405,93 @@ def test_local_discretize_real_inference():
 # Text features -- client-side embedding (text_columns=...)
 # --------------------------------------------------------------------------- #
 
+
+def _fake_torch(*, cuda_available=False, mps_available=False):
+    return types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: cuda_available),
+        backends=types.SimpleNamespace(
+            mps=types.SimpleNamespace(is_available=lambda: mps_available)
+        ),
+    )
+
+
+def test_text_device_auto_prefers_cuda_over_mps(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        _fake_torch(cuda_available=True, mps_available=True),
+    )
+
+    assert _resolve_text_device("auto") == "cuda"
+
+
+def test_text_device_auto_uses_mps_when_cuda_is_unavailable(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(mps_available=True))
+
+    assert _resolve_text_device(None) == "mps"
+
+
+def test_text_device_auto_falls_back_to_cpu(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch())
+
+    assert _resolve_text_device("auto") == "cpu"
+
+
+def test_text_device_explicit_override_skips_auto_detection(monkeypatch):
+    def unexpected_probe():
+        pytest.fail("explicit text_device should not probe accelerator availability")
+
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=unexpected_probe),
+        backends=types.SimpleNamespace(
+            mps=types.SimpleNamespace(is_available=unexpected_probe)
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    assert _resolve_text_device("cuda:1") == "cuda:1"
+
+
+@pytest.mark.parametrize("device", ["", "  ", 1])
+def test_text_device_rejects_invalid_explicit_override(device):
+    with pytest.raises(ValueError, match="text_device"):
+        _resolve_text_device(device)
+
+
+def test_text_device_is_forwarded_to_multimodal_preprocessor(monkeypatch):
+    capture = {}
+
+    class FakePreprocessor:
+        def __init__(self, text_columns, **kwargs):
+            capture["text_columns"] = text_columns
+            capture.update(kwargs)
+
+        def fit_transform(self, frame):
+            return np.zeros((len(frame), 1), dtype=np.float32)
+
+        def transform(self, frame):
+            return np.zeros((len(frame), 1), dtype=np.float32)
+
+    monkeypatch.setattr(
+        "synthefy_nori.text_features.MultimodalPreprocessor", FakePreprocessor
+    )
+    train = pd.DataFrame({"review": ["good", "bad"]})
+    test = pd.DataFrame({"review": ["fine"]})
+
+    _widen_text_columns(
+        train,
+        test,
+        ["review"],
+        8,
+        "minilm",
+        100,
+        "cuda:1",
+    )
+
+    assert capture["text_columns"] == ["review"]
+    assert capture["device"] == "cuda:1"
+
+
 def _fake_embed(texts):
     """Deterministic 8-d embedding, so tests need no sentence-transformers/model."""
     import hashlib
@@ -1409,6 +1500,34 @@ def _fake_embed(texts):
         h = hashlib.sha1(t.encode("utf-8")).digest()
         out.append(np.frombuffer(h[:8], dtype=np.uint8).astype(np.float32) / 255.0)
     return np.stack(out)
+
+
+class _FakePreloadedEncoder:
+    def encode(self, texts, **kwargs):
+        return _fake_embed(texts)
+
+
+@pytest.mark.parametrize(
+    "embedder",
+    [_fake_embed, _FakePreloadedEncoder()],
+    ids=["callable", "preloaded"],
+)
+def test_text_device_is_ignored_for_custom_encoder(embedder):
+    train = pd.DataFrame({"review": ["good", "bad", "great", "awful"]})
+    test = pd.DataFrame({"review": ["fine"]})
+
+    train_features, test_features = _widen_text_columns(
+        train,
+        test,
+        ["review"],
+        2,
+        embedder,
+        100,
+        "",
+    )
+
+    assert train_features.shape == (4, 2)
+    assert test_features.shape == (1, 2)
 
 
 def test_text_columns_embeds_client_side_and_sends_numeric():

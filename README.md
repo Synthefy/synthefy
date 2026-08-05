@@ -352,6 +352,28 @@ values) — cast genuine numeric columns to a numeric dtype if you want them kep
 magnitudes. (Plain lists/numpy arrays must already be numeric — encoding needs
 column names.)
 
+For raw text columns, install `pip install "synthefy[text]"` and name them with
+`text_columns=`. The client embeds those columns and optionally reduces them
+with SVD before sending the resulting numeric matrix, so this works in both
+local and remote modes:
+
+```python
+predictions = client.predict(
+    X_train,
+    y_train,
+    X_test,
+    text_columns=["review"],
+    svd_dim=128,
+)
+```
+
+Text embedding always happens on the client machine. By default,
+`text_device="auto"` uses CUDA/ROCm when available, then Apple MPS, and falls
+back to CPU. Pass `text_device="cpu"` (or another PyTorch device such as
+`"cuda:1"`) to override automatic selection. The remote service receives only
+the widened numeric features; remote mode does not move the sentence encoder to
+the server.
+
 Shapes are validated client-side: `X_train` and `y_train` must have the same
 number of rows, and `X_test` must have the same number of features as `X_train`.
 When both `X_train` and `X_test` are DataFrames, `X_test` is aligned to
@@ -621,7 +643,7 @@ continuous mean is already optimal for those metrics.
     rate-limits and grants per key. To target a single-model endpoint you host
     yourself, pass your own `base_url`/`endpoint` with `model=None`, which omits
     `"model"` from the request body.
-- `predict(X_train, y_train, X_test, task="regression", *, output_type="mean", quantiles=None, timeout=None, extra_headers=None) -> List[float]`
+- `predict(X_train, y_train, X_test, task="regression", *, output_type="mean", quantiles=None, text_columns=None, svd_dim=128, embedder="minilm", text_device="auto", timeout=None, extra_headers=None) -> List[float]`
   - Returns one predicted value per row of `X_test`. `timeout`/`extra_headers`
     apply to remote mode only.
   - `output_type=` picks what comes back from the predictive distribution:
@@ -639,6 +661,10 @@ continuous mean is already optimal for those metrics.
   - `max_categorical_cardinality` (default 100): non-numeric columns with more
     distinct training values than this — and datetime columns — are dropped with
     a warning instead of encoded.
+  - `text_columns` embeds named raw-text DataFrame columns client-side. The
+    default `text_device="auto"` prefers CUDA/ROCm, then Apple MPS, then CPU;
+    install the `text` extra and pass `text_device="cpu"` or another PyTorch
+    device string to override it.
   - `as_pandas=True` returns a pandas `Series` (named after `y_train`, indexed by
     `X_test`) instead of the default `list[float]` — or a `DataFrame` with one
     column per level (`"<target>[<level>]"`) for
