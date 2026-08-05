@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added `SynthefyNoriClient(deployment="sagemaker", model=...,
+- Added `SynthefyNoriClient(mode="sagemaker", model=...,
   endpoint_name=..., region_name=...)` for Amazon SageMaker real-time endpoints.
   It sends the same Nori request/response contract through boto3
   `InvokeEndpointWithResponseStream`, signed through boto3's standard AWS credential

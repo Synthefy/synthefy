@@ -16,7 +16,7 @@ A single :class:`SynthefyNoriClient` runs predictions in one of four modes,
 selected with the ``mode`` constructor argument:
 
 - ``"remote"`` (default) -- calls the hosted Baseten endpoint over HTTPS.
-- ``"aws"`` -- invokes a named Amazon SageMaker endpoint with AWS Signature V4,
+- ``"sagemaker"`` -- invokes a named Amazon SageMaker endpoint with AWS Signature V4,
   using boto3's standard credential chain.
 - ``"local"`` -- runs the same prediction in-process via the optional
   ``synthefy-nori`` package (``pip install "synthefy[local]"``), no network and
@@ -162,11 +162,8 @@ _DISTRIBUTION_OUTPUT_TYPES = ("quantiles", "full")
 _OUTPUT_TYPES = _POINT_OUTPUT_TYPES + _DISTRIBUTION_OUTPUT_TYPES
 DEFAULT_OUTPUT_TYPE = "mean"
 
-Mode = Literal["remote", "local", "auto"]
-_VALID_MODES = ("remote", "local", "auto")
-
-Deployment = Literal["sagemaker"]
-_VALID_DEPLOYMENTS = ("sagemaker",)
+Mode = Literal["remote", "local", "auto", "sagemaker"]
+_VALID_MODES = ("remote", "local", "auto", "sagemaker")
 
 # SageMaker Runtime's InvokeEndpointWithResponseStream request-body limit. Check it locally so a
 # caller gets a deterministic error before signing or sending a paid request.
@@ -1066,8 +1063,7 @@ class SynthefyNoriClient:
     rows are supplied alongside the query rows and one value per query row is
     returned in a single forward pass.
 
-    The ``mode`` argument selects local or Synthefy-hosted execution. The
-    ``deployment`` argument selects a customer-managed hosting transport:
+    The ``mode`` argument selects how predictions run:
 
     - ``"remote"`` (default): call the hosted Baseten endpoint over HTTPS.
       Requires an API key (``api_key`` argument or the
@@ -1077,7 +1073,7 @@ class SynthefyNoriClient:
       (``pip install "synthefy[local]"``). No network and no API key.
     - ``"auto"``: use ``"local"`` if ``synthefy-nori`` is installed, otherwise
       fall back to ``"remote"`` (which then requires an API key).
-    - ``deployment="sagemaker"``: invoke a named Amazon SageMaker endpoint
+    - ``"sagemaker"``: invoke a named Amazon SageMaker endpoint
       through boto3. Requests are SigV4-signed using boto3's standard credential
       chain; install the optional dependency with ``pip install "synthefy[aws]"``.
 
@@ -1096,12 +1092,8 @@ class SynthefyNoriClient:
         the ``SYNTHEFY_NORI_API_KEY`` environment variable. A
         :class:`ValueError` is raised if neither is set when remote mode is in
         effect.
-    mode : {"remote", "local", "auto"}, default "remote"
+    mode : {"remote", "local", "auto", "sagemaker"}, default "remote"
         How predictions run. See above.
-    deployment : {"sagemaker"} or None, optional
-        Customer-managed deployment transport. ``"sagemaker"`` invokes
-        ``endpoint_name`` with AWS credentials. It cannot be combined with local
-        or auto mode.
     timeout : float, default 300.0
         Per-request timeout in seconds for remote HTTP. SageMaker uses it as botocore's
         per-read inactivity timeout; 15-second server heartbeat chunks allow an active stream
@@ -1138,7 +1130,7 @@ class SynthefyNoriClient:
         Custom ``User-Agent`` value for HTTP remote mode. For SageMaker it is
         appended to botocore's normal user agent for request attribution.
     endpoint_name : str or None, optional
-        SageMaker endpoint name. Required with ``deployment="sagemaker"`` and
+        SageMaker endpoint name. Required with ``mode="sagemaker"`` and
         invalid otherwise.
     region_name : str or None, optional
         AWS region for SageMaker. If omitted, boto3 resolves it from
@@ -1177,7 +1169,7 @@ class SynthefyNoriClient:
     Invoke a named SageMaker endpoint with ambient AWS credentials:
 
     >>> client = SynthefyNoriClient(  # doctest: +SKIP
-    ...     deployment="sagemaker", model="nori-30m",
+    ...     mode="sagemaker", model="nori-30m",
     ...     endpoint_name="nori-30m-prod", region_name="us-east-1"
     ... )
     """
@@ -1187,7 +1179,6 @@ class SynthefyNoriClient:
         api_key: Optional[str] = None,
         *,
         mode: Mode = "remote",
-        deployment: Optional[Deployment] = None,
         timeout: float = 300.0,
         max_retries: int = 2,
         base_url: str = GATEWAY_BASE_URL,
@@ -1202,35 +1193,25 @@ class SynthefyNoriClient:
             raise ValueError(
                 f"mode must be one of {_VALID_MODES}; got {mode!r}"
             )
-        if deployment is not None and deployment not in _VALID_DEPLOYMENTS:
-            raise ValueError(
-                f"deployment must be one of {_VALID_DEPLOYMENTS} or None; "
-                f"got {deployment!r}"
-            )
         if auth_scheme not in _VALID_AUTH_SCHEMES:
             raise ValueError(
                 f"auth_scheme must be one of {_VALID_AUTH_SCHEMES}; "
                 f"got {auth_scheme!r}"
             )
-        if deployment == "sagemaker":
-            if mode != "remote":
-                raise ValueError(
-                    "deployment='sagemaker' cannot be combined with "
-                    f"mode={mode!r}; omit mode"
-                )
+        if mode == "sagemaker":
             if api_key is not None:
                 raise ValueError(
-                    "api_key is not used with deployment='sagemaker'; boto3 resolves and "
+                    "api_key is not used with mode='sagemaker'; boto3 resolves and "
                     "SigV4-signs with the standard AWS credential chain"
                 )
             if not endpoint_name or not endpoint_name.strip():
                 raise ValueError(
-                    "endpoint_name is required with deployment='sagemaker'"
+                    "endpoint_name is required with mode='sagemaker'"
                 )
         elif endpoint_name is not None or region_name is not None:
             raise ValueError(
                 "endpoint_name and region_name are only valid with "
-                "deployment='sagemaker'"
+                "mode='sagemaker'"
             )
         if model is _MODEL_REQUIRED or model is None:
             raise ValueError(
@@ -1241,10 +1222,9 @@ class SynthefyNoriClient:
         if mode == "auto":
             mode = "local" if _local_available() else "remote"
         self.mode: str = mode
-        self.deployment = deployment
 
         canonical_model = _canonical_model_name(model)
-        if deployment == "sagemaker" and canonical_model not in SAGEMAKER_VARIANTS:
+        if mode == "sagemaker" and canonical_model not in SAGEMAKER_VARIANTS:
             raise ValueError(
                 "SageMaker model must name a published Nori inference specification; "
                 f"choose one of: {', '.join(SAGEMAKER_VARIANTS)}"
@@ -1257,8 +1237,7 @@ class SynthefyNoriClient:
         # be installed, which is what mode="auto" resolves on).
         if (
             _is_thinking_model(model)
-            and deployment != "sagemaker"
-            and requested_mode != "remote"
+            and requested_mode not in ("remote", "sagemaker")
         ):
             raise ValueError(
                 f"model={model!r} is a Nori Thinking (test-time-compute) variant, which runs only "
@@ -1285,7 +1264,7 @@ class SynthefyNoriClient:
         self._aws_user_agent_extra = user_agent or "synthefy-python"
         self._aws_client: Optional[Any] = None
 
-        if deployment == "sagemaker":
+        if mode == "sagemaker":
             self.api_key = None
             self.client = None
             self._aws_client = _create_sagemaker_runtime_client(
@@ -1605,12 +1584,12 @@ class SynthefyNoriClient:
         # Validate the output contract first: a bad output_type/quantiles pair is
         # caught before the expensive steps below (loading a sentence encoder for
         # text_columns, a checkpoint, or a paid network round-trip).
-        if self.deployment == "sagemaker" and extra_headers is not None:
+        if self.mode == "sagemaker" and extra_headers is not None:
             raise ValueError(
                 "extra_headers is only valid for HTTP remote mode; SageMaker "
                 "requests are SigV4-signed by boto3"
             )
-        if self.deployment == "sagemaker" and timeout is not None:
+        if self.mode == "sagemaker" and timeout is not None:
             warnings.warn(
                 "Per-prediction timeout is ignored for SageMaker; boto3 applies "
                 "the timeout configured on SynthefyNoriClient.",
@@ -1649,7 +1628,7 @@ class SynthefyNoriClient:
                 q_by_row, taus, mean = self._predict_local_distribution(
                     request, output_type=output_type, quantile_levels=quantile_levels
                 )
-            elif self.deployment == "sagemaker":
+            elif self.mode == "sagemaker":
                 q_by_row, taus, mean = self._predict_aws_distribution(
                     request,
                     output_type=output_type,
@@ -1687,7 +1666,7 @@ class SynthefyNoriClient:
                 remote_levels = _resolve_remote_levels(
                     request.y_train, discretize, categorical_levels
                 )
-            if self.deployment == "sagemaker":
+            if self.mode == "sagemaker":
                 predictions = self._predict_aws(
                     request,
                     output_type=output_type,
@@ -1953,7 +1932,12 @@ class SynthefyNoriClient:
 
     @staticmethod
     def _read_sagemaker_stream(event_stream: Any) -> bytes:
-        """Collect SageMaker event-stream payload parts and close the stream."""
+        """Collect SageMaker event-stream payload parts and close the stream.
+
+        This deliberately stays synchronous: the public ``predict`` API and
+        boto3's event-stream iterator are both synchronous. An async wrapper
+        here would still block while boto3 reads each event.
+        """
         chunks: List[bytes] = []
         try:
             for event in event_stream:
@@ -1988,7 +1972,7 @@ class SynthefyNoriClient:
         if self._aws_client is None or self.endpoint_name is None:
             raise RuntimeError(
                 "SageMaker transport is not initialized; construct the client with "
-                "deployment='sagemaker' and endpoint_name"
+                "mode='sagemaker' and endpoint_name"
             )
         if self._sagemaker_model is None:
             raise RuntimeError("SageMaker transport has no resolved model identity")

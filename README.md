@@ -425,7 +425,7 @@ The Nori client reuses the package's
   exponential backoff, then surface as `RateLimitError` / `InternalServerError` /
   `APITimeoutError` / `APIConnectionError`.
 
-### Amazon SageMaker Usage (`deployment="sagemaker"`)
+### Amazon SageMaker Usage (`mode="sagemaker"`)
 
 Install the optional AWS transport and invoke a named real-time endpoint:
 
@@ -437,7 +437,7 @@ pip install "synthefy[aws]"
 from synthefy import SynthefyNoriClient
 
 client = SynthefyNoriClient(
-    deployment="sagemaker",
+    mode="sagemaker",
     model="nori-30m",
     endpoint_name="nori-30m-prod",
     region_name="us-east-1",
@@ -685,11 +685,10 @@ continuous mean is already optimal for those metrics.
 
 ### SynthefyNoriClient (Tabular Regression)
 
-- `SynthefyNoriClient(api_key=None, *, mode="remote", deployment=None, timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None, endpoint_name=None, region_name=None)` — `model` is **required everywhere** and accepts the three released Nori variants (`nori-6m`, `nori-30m`, and `nori-30m-thinking-medium`) or an explicit custom HTTP slug; there is no `None`/default model path. SageMaker uses response streaming for all three so large 30M requests can run beyond the regular-response limit while `predict()` still returns one normal result.
+- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None, endpoint_name=None, region_name=None)` — `model` is **required everywhere** and accepts the three released Nori variants (`nori-6m`, `nori-30m`, and `nori-30m-thinking-medium`) or an explicit custom HTTP slug; there is no `None`/default model path. SageMaker uses response streaming for all three so large 30M requests can run beyond the regular-response limit while `predict()` still returns one normal result.
   - `mode`: `"remote"` (hosted, default), `"local"` (in-process via
-    `synthefy-nori`), or `"auto"` (local if installed, else remote).
-  - `deployment="sagemaker"`: invoke a named SageMaker endpoint using the AWS
-    credential chain. It cannot be combined with local or auto mode.
+    `synthefy-nori`), `"auto"` (local if installed, else remote), or
+    `"sagemaker"` (a named SageMaker endpoint using the AWS credential chain).
   - `api_key` (remote mode) falls back to the `SYNTHEFY_NORI_API_KEY`
     environment variable. Not required in local mode.
   - Hosted Nori is reached by gateway slug — that is the path Synthefy meters,

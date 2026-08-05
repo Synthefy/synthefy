@@ -110,7 +110,7 @@ def test_aws_factory_uses_argument_free_boto3_session(monkeypatch):
     monkeypatch.setattr(module, "_load_aws_sdk", lambda: (FakeBoto3, FakeConfig))
 
     client = SynthefyNoriClient(
-        deployment="sagemaker",
+        mode="sagemaker",
         model="nori-30m",
         endpoint_name="nori-dev-123",
         region_name="us-east-1",
@@ -201,7 +201,7 @@ def test_aws_predict_streams_named_endpoint_with_canonical_body(monkeypatch):
     )
 
     client = SynthefyNoriClient(
-        deployment="sagemaker",
+        mode="sagemaker",
         model="nori-30m",
         endpoint_name="nori-dev-123",
         region_name="us-east-1",
@@ -260,7 +260,7 @@ def test_sagemaker_thinking_medium_uses_response_stream_and_checks_model(monkeyp
         lambda **_kwargs: FakeRuntime(),
     )
     client = SynthefyNoriClient(
-        deployment="sagemaker",
+        mode="sagemaker",
         model="nori-30m-thinking-medium",
         endpoint_name="nori-thinking-medium-prod",
     )
@@ -304,7 +304,7 @@ def test_sagemaker_response_model_mismatch_fails_closed(monkeypatch):
         lambda **_kwargs: FakeRuntime(),
     )
     client = SynthefyNoriClient(
-        deployment="sagemaker",
+        mode="sagemaker",
         model="nori-30m",
         endpoint_name="wrong-model-endpoint",
     )
@@ -339,7 +339,7 @@ def test_aws_model_error_preserves_original_container_status(monkeypatch):
         lambda **_kwargs: FailingRuntime(),
     )
     client = SynthefyNoriClient(
-        deployment="sagemaker",
+        mode="sagemaker",
         model="nori-30m",
         endpoint_name="nori-dev-123",
     )
@@ -386,23 +386,23 @@ def test_aws_constructor_and_predict_reject_transport_mismatches(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="model is required"):
-        SynthefyNoriClient(deployment="sagemaker", endpoint_name="nori-dev")
+        SynthefyNoriClient(mode="sagemaker", endpoint_name="nori-dev")
     with pytest.raises(ValueError, match="endpoint_name is required"):
-        SynthefyNoriClient(deployment="sagemaker", model="nori-30m")
+        SynthefyNoriClient(mode="sagemaker", model="nori-30m")
     with pytest.raises(ValueError, match="published Nori inference specification"):
         SynthefyNoriClient(
-            deployment="sagemaker", endpoint_name="nori-dev", model="custom"
+            mode="sagemaker", endpoint_name="nori-dev", model="custom"
         )
     with pytest.raises(ValueError, match="api_key is not used"):
         SynthefyNoriClient(
-            deployment="sagemaker",
+            mode="sagemaker",
             endpoint_name="nori-dev",
             model="nori-30m",
             api_key="secret",
         )
 
     client = SynthefyNoriClient(
-        deployment="sagemaker", endpoint_name="nori-dev", model="nori-30m"
+        mode="sagemaker", endpoint_name="nori-dev", model="nori-30m"
     )
     with pytest.raises(ValueError, match="extra_headers"):
         client.predict(
