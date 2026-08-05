@@ -168,7 +168,7 @@ _VALID_MODES = ("remote", "local", "auto")
 Deployment = Literal["sagemaker"]
 _VALID_DEPLOYMENTS = ("sagemaker",)
 
-# SageMaker Runtime's InvokeEndpoint request-body limit. Check it locally so a
+# SageMaker Runtime's InvokeEndpointWithResponseStream request-body limit. Check it locally so a
 # caller gets a deterministic error before signing or sending a paid request.
 SAGEMAKER_MAX_BODY_BYTES = 6_291_456
 
@@ -2000,7 +2000,7 @@ class SynthefyNoriClient:
         if len(body) > SAGEMAKER_MAX_BODY_BYTES:
             raise ValueError(
                 "The SageMaker request body is "
-                f"{len(body):,} bytes, exceeding InvokeEndpoint's "
+                f"{len(body):,} bytes, exceeding InvokeEndpointWithResponseStream's "
                 f"{SAGEMAKER_MAX_BODY_BYTES:,}-byte limit. Reduce the context/query rows."
             )
         try:
