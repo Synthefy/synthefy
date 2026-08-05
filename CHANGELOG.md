@@ -9,10 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added `SynthefyNoriClient(mode="aws", endpoint_name=..., region_name=...)` for
-  Amazon SageMaker real-time endpoints. It sends the same Nori request/response
-  contract through boto3 `InvokeEndpoint`, signed through boto3's standard AWS
-  credential chain; the public API accepts no raw AWS keys.
+- Added `SynthefyNoriClient(deployment="sagemaker", model=...,
+  endpoint_name=..., region_name=...)` for Amazon SageMaker real-time endpoints.
+  It sends the same Nori request/response contract through boto3
+  `InvokeEndpointWithResponseStream`, signed through boto3's standard AWS credential
+  chain; the public API accepts no raw AWS keys.
 - Added the optional `synthefy[aws]` dependency extra.
 - Added stubbed SageMaker Runtime tests for named-endpoint invocation, credential-
   chain construction, transport argument guards, and preservation of a container's
@@ -23,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hosted response capability checks are now shared by the Baseten and SageMaker
   transports, so distribution output and `memory_policy` cannot silently degrade on
   either backend.
+- `model` is required and non-null on every Nori transport. SageMaker accepts the
+  three released specifications: `nori-6m`, `nori-30m`, and
+  `nori-30m-thinking-medium`.
+- All SageMaker variants use response streaming with heartbeat chunks, allowing
+  large 30M requests to run beyond regular invocation's 60-second limit while the
+  synchronous client still returns one final typed result.
 - SageMaker requests fail locally before invocation when their encoded body exceeds
   the `InvokeEndpoint` API limit.
 

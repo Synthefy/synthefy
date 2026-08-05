@@ -52,9 +52,8 @@ GATEWAY_ENDPOINT = "/predict"
 # used by SynthefyAPIClient, so the whole package reads one naming scheme.
 NORI_API_KEY_ENV = "SYNTHEFY_NORI_API_KEY"
 
-# Sentinel for a required ``model=`` (there is no default -- every caller names a size). Kept
-# distinct from ``None``, which is a valid, meaningful value: omit "model" from the request body
-# entirely, for a caller-supplied ``base_url`` that routes by URL rather than by slug.
+# Sentinel for a required ``model=`` (there is no default -- every caller names a size).
+# Explicit ``None`` is rejected too: model identity is part of every transport contract.
 _MODEL_REQUIRED: Any = object()
 
 # Model registry. Maps a ``model=`` selector -> ``(remote_gateway_slug, local_variant)``:
@@ -65,9 +64,9 @@ _MODEL_REQUIRED: Any = object()
 # changes which model it serves (``model=`` is required; see the constructor). "nori-6m" is the ~6M
 # base; "nori-30m" is the ~29.2M variant. The raw gateway slugs are listed too so they load the
 # right checkpoint locally instead of being treated as a raw HF repo.
-# The "nori-30m-thinking*" entries are the test-time-compute (Thinking) variants: hosted-API only,
+# The "nori-30m-thinking-medium" entries are the test-time-compute variant: hosted-API only,
 # so they map a remote gateway slug but have NO local variant -- the thinking guard in __init__
-# refuses them in mode="local"/"auto" (their ``local_variant`` below is therefore never consulted).
+# refuses it in mode="local"/"auto" (its ``local_variant`` below is therefore never consulted).
 # A friendly name/slug absent here that reaches local mode has no local checkpoint and is refused
 # rather than silently running a different model (see ``_resolve_local_variant``).
 NORI_VARIANTS = {
@@ -76,13 +75,9 @@ NORI_VARIANTS = {
     "synthefy/nori-6m": ("synthefy/nori-6m", "nori-6m"),
     "synthefy/nori-30m": ("synthefy/nori-30m", "nori-30m"),
     # Thinking (test-time compute) -- hosted deployments only; local/auto is refused by the
-    # thinking guard. Each budget is a distinct deployment and must never alias another tier.
-    "nori-30m-thinking": ("synthefy/nori-30m-thinking", None),
+    # thinking guard. Medium is the only released Thinking budget.
     "nori-30m-thinking-medium": ("synthefy/nori-30m-thinking-medium", None),
-    "nori-30m-thinking-high": ("synthefy/nori-30m-thinking-high", None),
-    "synthefy/nori-30m-thinking": ("synthefy/nori-30m-thinking", None),
     "synthefy/nori-30m-thinking-medium": ("synthefy/nori-30m-thinking-medium", None),
-    "synthefy/nori-30m-thinking-high": ("synthefy/nori-30m-thinking-high", None),
 }
 
 # Selectable model names for error messages, derived from NORI_VARIANTS so they stay current as
@@ -98,10 +93,9 @@ SAGEMAKER_VARIANTS = tuple(_MODEL_NAMES)
 def _is_thinking_model(model: Optional[str]) -> bool:
     """Return ``True`` if ``model`` names a Nori Thinking (test-time-compute) variant.
 
-    Thinking variants (gateway slugs like ``"synthefy/nori-30m-thinking-medium"``) spend extra
+    The Thinking variant (gateway slug ``"synthefy/nori-30m-thinking-medium"``) spends extra
     inference to lift accuracy and run **only** on the hosted API -- there is no local checkpoint
-    for them. Matching on the ``"thinking"`` token covers every budget tier (``-thinking``,
-    ``-thinking-medium``, ``-thinking-high``) and both the friendly and slug spellings.
+    for it. Matching on the ``"thinking"`` token covers both the friendly and slug spellings.
     """
     return model is not None and "thinking" in model.lower()
 
@@ -110,8 +104,8 @@ def _resolve_variant(model: Optional[str]) -> tuple:
     """Map a model selector to ``(gateway_model, local_variant)``.
 
     A known name or slug resolves via :data:`NORI_VARIANTS`; anything else (a custom gateway
-    slug, or ``None`` for a self-hosted single-model endpoint) passes through as the gateway
-    model. The ``local_variant`` is what local mode would forward to synthefy-nori's ``model=``
+    slug) passes through as the gateway model. The ``local_variant`` is what local mode would
+    forward to synthefy-nori's ``model=``
     selector, but whether a selector is actually runnable locally is enforced by
     :func:`_resolve_local_variant`, not here -- this function never raises.
     """
@@ -1091,7 +1085,7 @@ class SynthefyNoriClient:
     (``https://inference.baseten.co/predict``) and includes the chosen size slug (e.g.
     ``"model": "synthefy/nori-30m"``) in the request body. The gateway resolves that slug
     to a deployment and authenticates with the ``Bearer`` scheme (the default
-    ``auth_scheme``). ``base_url``, ``endpoint``, ``model=None`` and ``auth_scheme`` are
+    ``auth_scheme``). ``base_url``, ``endpoint``, a custom ``model`` slug, and ``auth_scheme`` are
     available for pointing the client at some other host, but the gateway is the supported
     path and the only one Synthefy meters and rate-limits.
 
@@ -1109,8 +1103,10 @@ class SynthefyNoriClient:
         ``endpoint_name`` with AWS credentials. It cannot be combined with local
         or auto mode.
     timeout : float, default 300.0
-        Per-request timeout in seconds (remote and SageMaker deployments). SageMaker applies
-        it when constructing the boto3 client; per-call overrides are not supported.
+        Per-request timeout in seconds for remote HTTP. SageMaker uses it as botocore's
+        per-read inactivity timeout; 15-second server heartbeat chunks allow an active stream
+        to continue up to SageMaker's eight-minute service limit. Per-call overrides are not
+        supported for SageMaker.
     max_retries : int, default 2
         Number of retries for transient errors (timeouts, connection errors,
         429 and 5xx responses). Remote mode uses exponential backoff; SageMaker
@@ -1119,18 +1115,17 @@ class SynthefyNoriClient:
         Base URL of the inference host (remote mode).
     endpoint : str, default GATEWAY_ENDPOINT
         Path appended to ``base_url`` for predictions (remote mode).
-    model : str or None, REQUIRED
+    model : str, REQUIRED
         Which Nori to run — there is no default; every request names a size. Pass a friendly
         size selector — ``"nori-6m"`` (the ~6M base) or ``"nori-30m"`` (the ~29.2M variant) —
         which selects both the remote gateway deployment and, in local mode, the checkpoint. A
         raw gateway slug (e.g. ``"synthefy/nori-30m"``) is also accepted verbatim. Omitting
-        the argument raises :class:`ValueError`; an explicit ``None`` remains available for
-        backwards-compatible custom HTTP/local integrations, but is rejected for SageMaker,
-        where exact model identity is mandatory. Selecting a variant in local mode requires a
+        the argument or passing ``None`` raises :class:`ValueError`; every transport requires
+        explicit model identity. Selecting a variant in local mode requires a
         synthefy-nori build with the ``model=`` selector.
-        Nori Thinking — ``"nori-30m-thinking"``, ``"nori-30m-thinking-medium"``, and
-        ``"nori-30m-thinking-high"`` — runs only on hosted deployments:
-        passing one with ``mode="local"`` or ``mode="auto"`` raises :class:`ValueError` rather
+        Nori Thinking Medium — ``"nori-30m-thinking-medium"`` — runs only on hosted
+        deployments: passing it with ``mode="local"`` or ``mode="auto"`` raises
+        :class:`ValueError` rather
         than silently running the base model — use ``mode="remote"``. Likewise a selector with no
         local checkpoint (an unknown/custom slug) raises in local mode instead of falling back to
         the base model. SageMaker also requires the model name and verifies it
@@ -1237,7 +1232,7 @@ class SynthefyNoriClient:
                 "endpoint_name and region_name are only valid with "
                 "deployment='sagemaker'"
             )
-        if model is _MODEL_REQUIRED:
+        if model is _MODEL_REQUIRED or model is None:
             raise ValueError(
                 "model is required -- there is no default; every request names a size. "
                 f"Choose one of: {', '.join(_MODEL_NAMES)} (a raw gateway slug is also accepted)."
@@ -1279,7 +1274,7 @@ class SynthefyNoriClient:
         self.endpoint_name = endpoint_name
         self.region_name = region_name
         # self.model is the gateway model id sent in the remote body: a friendly name maps to its
-        # slug, a raw slug or None passes through. In local mode we additionally resolve -- and
+        # slug, and a raw slug passes through. In local mode we additionally resolve -- and
         # validate -- the local checkpoint selector, which raises for a selector that has no local
         # checkpoint rather than silently substituting the base model.
         self.model, self._local_variant = _resolve_variant(model)
@@ -2009,36 +2004,23 @@ class SynthefyNoriClient:
                 f"{SAGEMAKER_MAX_BODY_BYTES:,}-byte limit. Reduce the context/query rows."
             )
         try:
-            if _is_thinking_model(self._sagemaker_model):
-                response = self._aws_client.invoke_endpoint_with_response_stream(
-                    EndpointName=self.endpoint_name,
-                    ContentType="application/json",
-                    Accept="application/json",
-                    CustomAttributes="synthefy-response-stream=v1",
-                    Body=body,
-                )
-            else:
-                response = self._aws_client.invoke_endpoint(
-                    EndpointName=self.endpoint_name,
-                    ContentType="application/json",
-                    Accept="application/json",
-                    Body=body,
-                )
+            # All AWS variants stream. Even base 30M can exceed SageMaker's 60-second regular
+            # response ceiling for large tables; heartbeat payload parts keep the connection
+            # active while the public predict() API continues to return one final typed value.
+            response = self._aws_client.invoke_endpoint_with_response_stream(
+                EndpointName=self.endpoint_name,
+                ContentType="application/json",
+                Accept="application/json",
+                CustomAttributes="synthefy-response-stream=v1",
+                Body=body,
+            )
         except Exception as exc:
             # Credential, region, signing, and throttling exceptions stay as botocore errors.
             self._raise_sagemaker_model_error(exc)
             raise RuntimeError("unreachable")  # pragma: no cover
 
         response_body = response["Body"]
-        if _is_thinking_model(self._sagemaker_model):
-            raw = self._read_sagemaker_stream(response_body)
-        elif hasattr(response_body, "read"):
-            try:
-                raw = response_body.read()
-            finally:
-                response_body.close()
-        else:
-            raw = response_body
+        raw = self._read_sagemaker_stream(response_body)
         response_data = json.loads(raw)
         if not isinstance(response_data, dict):
             raise ValueError(

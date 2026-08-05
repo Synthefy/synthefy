@@ -12,7 +12,6 @@ import math
 import sys
 import types
 import warnings
-from io import BytesIO
 from pathlib import Path
 from typing import Optional, Callable, Dict, List
 
@@ -129,11 +128,10 @@ def test_aws_factory_uses_argument_free_boto3_session(monkeypatch):
     assert capture["closed"] is True
 
 
-def test_aws_predict_invokes_named_endpoint_with_canonical_body(monkeypatch):
+def test_botocore_stubber_accepts_the_streaming_request_shape():
+    """Keep the exact operation and signed parameter names checked by botocore."""
     import boto3
-    from botocore.response import StreamingBody
     from botocore.stub import Stubber
-    from synthefy import nori_client as module
 
     runtime = boto3.client(
         "sagemaker-runtime",
@@ -141,6 +139,30 @@ def test_aws_predict_invokes_named_endpoint_with_canonical_body(monkeypatch):
         aws_access_key_id="unit-test",
         aws_secret_access_key="unit-test",
     )
+    request = {
+        "EndpointName": "nori-dev-123",
+        "ContentType": "application/json",
+        "Accept": "application/json",
+        "CustomAttributes": "synthefy-response-stream=v1",
+        "Body": b'{}',
+    }
+    stubber = Stubber(runtime)
+    stubber.add_response(
+        "invoke_endpoint_with_response_stream",
+        {"Body": {"PayloadPart": {"Bytes": b'{}'}}},
+        request,
+    )
+
+    with stubber:
+        response = runtime.invoke_endpoint_with_response_stream(**request)
+        assert response["Body"]["PayloadPart"]["Bytes"] == b'{}'
+        stubber.assert_no_pending_responses()
+
+
+def test_aws_predict_streams_named_endpoint_with_canonical_body(monkeypatch):
+    from synthefy import nori_client as module
+
+    capture: Dict = {}
     response_body = json.dumps(
         {
             "task": "regression",
@@ -158,41 +180,50 @@ def test_aws_predict_invokes_named_endpoint_with_canonical_body(monkeypatch):
         },
         separators=(",", ":"),
     ).encode("utf-8")
-    stubber = Stubber(runtime)
-    stubber.add_response(
-        "invoke_endpoint",
-        {
-            "Body": StreamingBody(BytesIO(response_body), len(response_body)),
-            "ContentType": "application/json",
-        },
-        {
-            "EndpointName": "nori-dev-123",
-            "ContentType": "application/json",
-            "Accept": "application/json",
-            "Body": request_body,
-        },
-    )
+    class FakeEventStream:
+        def __iter__(self):
+            yield {"PayloadPart": {"Bytes": b" \n"}}
+            yield {"PayloadPart": {"Bytes": response_body}}
+
+        def close(self):
+            capture["closed"] = True
+
+    class FakeRuntime:
+        def invoke_endpoint_with_response_stream(self, **kwargs):
+            capture["request"] = kwargs
+            return {"Body": FakeEventStream()}
+
+        def close(self):
+            pass
+
     monkeypatch.setattr(
-        module, "_create_sagemaker_runtime_client", lambda **_kwargs: runtime
+        module, "_create_sagemaker_runtime_client", lambda **_kwargs: FakeRuntime()
     )
 
-    with stubber:
-        client = SynthefyNoriClient(
-            deployment="sagemaker",
-            model="nori-30m",
-            endpoint_name="nori-dev-123",
-            region_name="us-east-1",
-        )
-        predictions = client.predict(
-            X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
-            y_train=[1.0, 1.0, 2.0],
-            X_test=[[2.0, 2.0], [3.0, 3.0]],
-        )
-        assert predictions == [10.0, 20.0]
-        stubber.assert_no_pending_responses()
+    client = SynthefyNoriClient(
+        deployment="sagemaker",
+        model="nori-30m",
+        endpoint_name="nori-dev-123",
+        region_name="us-east-1",
+    )
+    predictions = client.predict(
+        X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
+        y_train=[1.0, 1.0, 2.0],
+        X_test=[[2.0, 2.0], [3.0, 3.0]],
+    )
+
+    assert predictions == [10.0, 20.0]
+    assert capture["request"] == {
+        "EndpointName": "nori-dev-123",
+        "ContentType": "application/json",
+        "Accept": "application/json",
+        "CustomAttributes": "synthefy-response-stream=v1",
+        "Body": request_body,
+    }
+    assert capture["closed"] is True
 
 
-def test_sagemaker_thinking_uses_response_stream_and_checks_model(monkeypatch):
+def test_sagemaker_thinking_medium_uses_response_stream_and_checks_model(monkeypatch):
     from synthefy import nori_client as module
 
     capture: Dict = {}
@@ -205,7 +236,7 @@ def test_sagemaker_thinking_uses_response_stream_and_checks_model(monkeypatch):
                     "Bytes": json.dumps(
                         {
                             "task": "regression",
-                            "model": "nori-30m-thinking-high",
+                            "model": "nori-30m-thinking-medium",
                             "predictions": [3.0],
                         }
                     ).encode()
@@ -230,16 +261,16 @@ def test_sagemaker_thinking_uses_response_stream_and_checks_model(monkeypatch):
     )
     client = SynthefyNoriClient(
         deployment="sagemaker",
-        model="nori-30m-thinking-high",
-        endpoint_name="nori-thinking-high-prod",
+        model="nori-30m-thinking-medium",
+        endpoint_name="nori-thinking-medium-prod",
     )
 
     predictions = client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
 
     assert predictions == [3.0]
-    assert capture["request"]["EndpointName"] == "nori-thinking-high-prod"
+    assert capture["request"]["EndpointName"] == "nori-thinking-medium-prod"
     assert capture["request"]["CustomAttributes"] == "synthefy-response-stream=v1"
-    assert json.loads(capture["request"]["Body"])["model"] == "nori-30m-thinking-high"
+    assert json.loads(capture["request"]["Body"])["model"] == "nori-30m-thinking-medium"
     assert capture["closed"] is True
 
 
@@ -247,17 +278,21 @@ def test_sagemaker_response_model_mismatch_fails_closed(monkeypatch):
     from synthefy import nori_client as module
 
     class FakeRuntime:
-        def invoke_endpoint(self, **_kwargs):
+        def invoke_endpoint_with_response_stream(self, **_kwargs):
             return {
-                "Body": BytesIO(
-                    json.dumps(
-                        {
-                            "task": "regression",
-                            "model": "nori-6m",
-                            "predictions": [2.0],
+                "Body": [
+                    {
+                        "PayloadPart": {
+                            "Bytes": json.dumps(
+                                {
+                                    "task": "regression",
+                                    "model": "nori-6m",
+                                    "predictions": [2.0],
+                                }
+                            ).encode()
                         }
-                    ).encode()
-                )
+                    }
+                ]
             }
 
         def close(self):
@@ -283,7 +318,7 @@ def test_aws_model_error_preserves_original_container_status(monkeypatch):
     from synthefy import nori_client as module
 
     class FailingRuntime:
-        def invoke_endpoint(self, **_kwargs):
+        def invoke_endpoint_with_response_stream(self, **_kwargs):
             raise ClientError(
                 {
                     "Error": {"Code": "ModelError", "Message": "wrapped"},
@@ -324,17 +359,21 @@ def test_aws_constructor_and_predict_reject_transport_mismatches(monkeypatch):
     from synthefy import nori_client as module
 
     class FakeRuntime:
-        def invoke_endpoint(self, **_kwargs):
+        def invoke_endpoint_with_response_stream(self, **_kwargs):
             return {
-                "Body": BytesIO(
-                    json.dumps(
-                        {
-                            "task": "regression",
-                            "model": "nori-30m",
-                            "predictions": [2.0],
+                "Body": [
+                    {
+                        "PayloadPart": {
+                            "Bytes": json.dumps(
+                                {
+                                    "task": "regression",
+                                    "model": "nori-30m",
+                                    "predictions": [2.0],
+                                }
+                            ).encode()
                         }
-                    ).encode()
-                )
+                    }
+                ]
             }
 
         def close(self):
@@ -970,15 +1009,13 @@ def test_nan_is_sent_to_the_server_as_json_null():
     assert sent[1][1] is None
 
 
-def test_model_none_omits_the_model_field():
-    # model=None is the escape for a caller-supplied base_url that routes by URL instead of by
-    # slug: the body then carries no "model" key at all.
+def test_custom_http_endpoint_still_requires_and_sends_model():
     capture: Dict = {}
     client = SynthefyNoriClient(
         api_key="test-key",
         base_url="https://example.invalid",
         endpoint="/predict",
-        model=None,
+        model="customer/custom-nori",
     )
     _attach_mock(client, _ok_handler([1.0], capture))
 
@@ -988,7 +1025,7 @@ def test_model_none_omits_the_model_field():
 
     assert preds == [1.0]
     assert capture["path"] == "/predict"
-    assert "model" not in capture["body"]
+    assert capture["body"]["model"] == "customer/custom-nori"
 
 
 def test_no_dedicated_url_constants_are_exported():
@@ -1351,15 +1388,12 @@ def test_model_variant_resolves_gateway_and_local():
     craw = SynthefyNoriClient(api_key="k", model="synthefy/custom")
     assert craw.model == "synthefy/custom" and craw._local_variant is None
 
-    # None (dedicated endpoint) stays None
-    cnone = SynthefyNoriClient(api_key="k", model=None)
-    assert cnone.model is None and cnone._local_variant is None
-
-
 def test_model_is_required_no_default():
     # There is no default model -- omitting model= raises (every request names a size).
     with pytest.raises(ValueError, match="model is required"):
         SynthefyNoriClient(api_key="k")
+    with pytest.raises(ValueError, match="model is required"):
+        SynthefyNoriClient(api_key="k", model=None)
     # An explicit size resolves to its size-suffixed gateway slug + local checkpoint.
     c = SynthefyNoriClient(api_key="k", model="nori-30m")
     assert c.model == "synthefy/nori-30m"
@@ -1432,13 +1466,10 @@ def test_gateway_slug_resolves_to_local_variant():
 # --------------------------------------------------------------------------- #
 
 
-def test_is_thinking_model_matches_every_tier():
+def test_is_thinking_model_matches_released_medium_selector():
     for name in (
-        "synthefy/nori-30m-thinking",
         "synthefy/nori-30m-thinking-medium",
-        "synthefy/nori-30m-thinking-high",
         "nori-30m-thinking-medium",
-        "NORI-THINKING",
     ):
         assert _is_thinking_model(name)
     for name in ("nori", "nori-6m", "nori-30m", "synthefy/nori", "synthefy/custom", None):
@@ -1450,9 +1481,7 @@ def test_is_thinking_model_matches_every_tier():
     "model",
     [
         "synthefy/nori-30m-thinking-medium",  # raw gateway slug
-        "nori-30m-thinking",                  # friendly aliases (every tier)
         "nori-30m-thinking-medium",
-        "nori-30m-thinking-high",
     ],
 )
 def test_thinking_model_raises_in_local_and_auto_modes(mode, model):
@@ -1462,23 +1491,17 @@ def test_thinking_model_raises_in_local_and_auto_modes(mode, model):
         SynthefyNoriClient(mode=mode, model=model)
 
 
-@pytest.mark.parametrize(
-    "friendly,slug",
-    [
-        ("nori-30m-thinking", "synthefy/nori-30m-thinking"),
-        ("nori-30m-thinking-medium", "synthefy/nori-30m-thinking-medium"),
-        ("nori-30m-thinking-high", "synthefy/nori-30m-thinking-high"),
-    ],
-)
-def test_thinking_friendly_name_resolves_to_gateway_slug_remote(friendly, slug):
+def test_thinking_friendly_name_resolves_to_gateway_slug_remote():
     # In remote mode the friendly Thinking name maps to its gateway slug (uniform with nori-30m),
     # so callers never need the raw "synthefy/" prefix.
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="k", model=friendly)  # remote (default)
-    assert client.model == slug
+    client = SynthefyNoriClient(
+        api_key="k", model="nori-30m-thinking-medium"
+    )  # remote (default)
+    assert client.model == "synthefy/nori-30m-thinking-medium"
     _attach_mock(client, _ok_handler([1.0], capture))
     client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
-    assert capture["body"]["model"] == slug
+    assert capture["body"]["model"] == "synthefy/nori-30m-thinking-medium"
 
 
 def test_unknown_model_raises_in_local_mode_no_base_fallback():
@@ -1594,15 +1617,14 @@ def test_snap_to_levels_preserves_nan_predictions():
 def test_local_mode_passes_discretize_and_levels(monkeypatch):
     seen: Dict = {}
 
-    def fake_predict(X_train, y_train, X_test, *, task=None, **kwargs):
+    def fake_predict(X_train, y_train, X_test, *, task=None, model=None, **kwargs):
+        assert model == "nori-30m"
         seen.update(kwargs)
         return [1.0]
 
     monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
     monkeypatch.setattr("synthefy.nori_client._local_discretize_available", lambda: True)
-    # model=None forwards no variant selector, isolating this to discretize forwarding
-    # (variant selection is covered by its own test).
-    client = SynthefyNoriClient(mode="local", model=None)
+    client = SynthefyNoriClient(mode="local", model="nori-30m")
     client.predict(
         X_train=_XTR,
         y_train=_YTR,
@@ -1617,24 +1639,26 @@ def test_local_mode_passes_discretize_and_levels(monkeypatch):
 def test_local_mode_levels_alone_activate_package_default(monkeypatch):
     seen: Dict = {}
 
-    def fake_predict(X_train, y_train, X_test, *, task=None, **kwargs):
+    def fake_predict(X_train, y_train, X_test, *, task=None, model=None, **kwargs):
+        assert model == "nori-30m"
         seen.update(kwargs)
         return [1.0]
 
     monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
     monkeypatch.setattr("synthefy.nori_client._local_discretize_available", lambda: True)
-    client = SynthefyNoriClient(mode="local", model=None)  # no variant selector (see note above)
+    client = SynthefyNoriClient(mode="local", model="nori-30m")
     client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE, categorical_levels=[1, 2])
     assert "discretize" not in seen  # package picks its own default (map-cell)
     assert seen["categorical_levels"] == [1, 2]
 
 
-def test_local_mode_without_discretize_sends_no_extra_kwargs(monkeypatch):
-    def strict_predict(X_train, y_train, X_test, *, task=None):  # no **kwargs
+def test_local_mode_without_discretize_sends_only_required_model(monkeypatch):
+    def strict_predict(X_train, y_train, X_test, *, task=None, model=None):
+        assert model == "nori-30m"
         return [1.0]
 
     monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: strict_predict)
-    client = SynthefyNoriClient(mode="local", model=None)  # no variant selector; bare predict signature works
+    client = SynthefyNoriClient(mode="local", model="nori-30m")
     assert client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE) == [1.0]
 
 
@@ -1644,12 +1668,12 @@ def test_local_mode_preserves_degradation_warning_and_message(monkeypatch):
 
     message = "Nori: SVD fit failed -> passthrough of all 400 raw columns"
 
-    def degraded_predict(X_train, y_train, X_test, *, task=None):
+    def degraded_predict(X_train, y_train, X_test, *, task=None, model=None):
         warnings.warn(message, LocalDegradationWarning)
         return [1.0]
 
     monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: degraded_predict)
-    client = SynthefyNoriClient(mode="local", model=None)
+    client = SynthefyNoriClient(mode="local", model="nori-30m")
 
     with pytest.warns(LocalDegradationWarning, match="SVD fit failed") as caught:
         assert client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE) == [1.0]
@@ -1663,12 +1687,12 @@ def test_local_mode_preserves_strict_degradation_error_and_message(monkeypatch):
 
     message = "Nori: SVD transform failed -> a single all-zero column"
 
-    def degraded_predict(X_train, y_train, X_test, *, task=None):
+    def degraded_predict(X_train, y_train, X_test, *, task=None, model=None):
         warnings.warn(message, LocalDegradationWarning)
         return [1.0]
 
     monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: degraded_predict)
-    client = SynthefyNoriClient(mode="local", model=None)
+    client = SynthefyNoriClient(mode="local", model="nori-30m")
 
     with warnings.catch_warnings():
         # synthefy_nori.strict_pipeline(SvdFallbackWarning) uses this same standard-library
@@ -2648,7 +2672,8 @@ def test_local_median_also_uses_the_estimator(monkeypatch):
 def test_local_mean_still_uses_the_functional_predict(monkeypatch):
     # The default path must not change: it keeps calling synthefy_nori.predict, so
     # existing local behavior is byte-for-byte what it was.
-    def fake_predict(X_train, y_train, X_test, *, task=None, **kwargs):
+    def fake_predict(X_train, y_train, X_test, *, task=None, model=None, **kwargs):
+        assert model == "nori-30m"
         return [7.0]
 
     def _boom():
@@ -2656,7 +2681,7 @@ def test_local_mean_still_uses_the_functional_predict(monkeypatch):
 
     monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
     monkeypatch.setattr("synthefy.nori_client._load_local_regressor", _boom)
-    client = SynthefyNoriClient(mode="local", model=None)
+    client = SynthefyNoriClient(mode="local", model="nori-30m")
     assert client.predict(_XTR, _YTR, _XTE) == [7.0]
 
 

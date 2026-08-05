@@ -458,10 +458,15 @@ checked against it so a routing mistake fails closed. `auto` mode never selects
 SageMaker.
 
 SageMaker's request is the same Nori JSON contract used by the hosted transport,
-sent through `InvokeEndpoint` with `application/json`. Container errors retain
+sent through `InvokeEndpointWithResponseStream` with `application/json` for all three
+models. The server emits 15-second heartbeat chunks and one final JSON result, which
+the client buffers into the normal `predict()` return value. This lets large 30M
+requests use SageMaker's streaming processing window (up to eight minutes) instead of
+the regular invocation's 60-second limit. Container errors retain
 their original status/message through the normal Synthefy exception hierarchy;
 AWS credential, signing, region, quota, and throttling errors remain native AWS
-SDK exceptions. Set request timeout/retries on the constructor. HTTP-only
+SDK exceptions. The constructor timeout is SageMaker's per-read inactivity timeout,
+not a total stream deadline. Set timeout/retries on the constructor. HTTP-only
 `extra_headers=` are rejected for SageMaker. Per-call `timeout=` is ignored with
 a warning.
 
@@ -680,7 +685,7 @@ continuous mean is already optimal for those metrics.
 
 ### SynthefyNoriClient (Tabular Regression)
 
-- `SynthefyNoriClient(api_key=None, *, mode="remote", deployment=None, timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None, endpoint_name=None, region_name=None)` — the `model` argument is **required** and accepts the five released Nori variants. Explicit `None` remains a compatibility escape for custom HTTP/local integrations, but SageMaker requires an exact name.
+- `SynthefyNoriClient(api_key=None, *, mode="remote", deployment=None, timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None, endpoint_name=None, region_name=None)` — `model` is **required everywhere** and accepts the three released Nori variants (`nori-6m`, `nori-30m`, and `nori-30m-thinking-medium`) or an explicit custom HTTP slug; there is no `None`/default model path. SageMaker uses response streaming for all three so large 30M requests can run beyond the regular-response limit while `predict()` still returns one normal result.
   - `mode`: `"remote"` (hosted, default), `"local"` (in-process via
     `synthefy-nori`), or `"auto"` (local if installed, else remote).
   - `deployment="sagemaker"`: invoke a named SageMaker endpoint using the AWS
@@ -689,8 +694,7 @@ continuous mean is already optimal for those metrics.
     environment variable. Not required in local mode.
   - Hosted Nori is reached by gateway slug — that is the path Synthefy meters,
     rate-limits and grants per key. To target a single-model endpoint you host
-    yourself, pass your own `base_url`/`endpoint`; an explicit `model=None` retains
-    the legacy URL-routed behavior.
+    yourself, pass your own `base_url`/`endpoint` and an explicit custom model slug.
 - `predict(X_train, y_train, X_test, task="regression", *, output_type="mean", quantiles=None, text_columns=None, svd_dim=128, embedder="minilm", text_device="auto", timeout=None, extra_headers=None) -> List[float]`
   - Returns one predicted value per row of `X_test`. `timeout`/`extra_headers`
     apply to remote mode only.
