@@ -5,11 +5,11 @@
 | `dev` | [![Tests](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml/badge.svg?branch=dev)](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml?query=branch%3Adev) |
 | `main` | [![Tests](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml/badge.svg?branch=main)](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml?query=branch%3Amain) |
 
-A Python client for the Synthefy API. It provides time series **forecasting** (synchronous and asynchronous) and **tabular in-context regression** via `SynthefyNoriClient` — which runs against the hosted endpoint or fully locally — with an easy-to-use interface, full type hints, and pydantic validation.
+A Python client for the Synthefy API. It provides time series **forecasting** (synchronous and asynchronous) and **tabular in-context regression** via `SynthefyNoriClient` — which runs against the hosted endpoint, a named AWS SageMaker endpoint, or fully locally — with an easy-to-use interface, full type hints, and pydantic validation.
 
 ## Features
 
-- **Tabular In-Context Regression**: `SynthefyNoriClient` predicts from labeled context rows in a single forward pass — hosted on Baseten or fully local, no training step
+- **Tabular In-Context Regression**: `SynthefyNoriClient` predicts from labeled context rows in a single forward pass — hosted on Baseten or SageMaker, or fully local, no training step
 - **Free Prediction Intervals**: the same forward pass carries a full predictive distribution, so `output_type="quantiles"` returns calibrated bands at no extra cost
 - **Sync & Async Support**: Separate clients for synchronous and asynchronous operations
 - **Professional Error Handling**: Comprehensive exception hierarchy with detailed error messages
@@ -28,6 +28,12 @@ For optional fully-local tabular inference (no API key, runs in-process), instal
 
 ```bash
 pip install "synthefy[local]"
+```
+
+For signed invocation of your own Amazon SageMaker endpoint, install the AWS extra:
+
+```bash
+pip install "synthefy[aws]"
 ```
 
 ## Quick Start
@@ -253,9 +259,9 @@ value per query row in a single forward pass — there is no training step.
 
 It is independent of the forecasting client above (different model, different
 endpoint, different credential) but is exported from the same package. A single
-`SynthefyNoriClient` runs predictions either against the hosted endpoint or
-locally, selected with the `mode` argument (`"remote"` (default), `"local"`, or
-`"auto"`).
+`SynthefyNoriClient` runs predictions against the hosted endpoint, a named AWS
+SageMaker endpoint, or locally, selected with the `mode` argument (`"remote"`
+(default), `"aws"`, `"local"`, or `"auto"`).
 
 ### Use it from your AI coding assistant
 
@@ -418,6 +424,59 @@ The Nori client reuses the package's
 - Transient errors (timeouts, connection errors, `429`, `5xx`) are retried with
   exponential backoff, then surface as `RateLimitError` / `InternalServerError` /
   `APITimeoutError` / `APIConnectionError`.
+
+### Amazon SageMaker Usage (`mode="sagemaker"`)
+
+Install the optional AWS transport and invoke a named real-time endpoint:
+
+```bash
+pip install "synthefy[aws]"
+```
+
+```python
+from synthefy import SynthefyNoriClient
+
+client = SynthefyNoriClient(
+    mode="sagemaker",
+    model="nori-30m",
+    endpoint_name="nori-30m-prod",
+    region_name="us-east-1",
+)
+predictions = client.predict(
+    X_train=[[0.0], [1.0]],
+    y_train=[0.0, 1.0],
+    X_test=[[2.0]],
+)
+```
+
+The client creates an argument-free `boto3.Session()` and therefore uses
+boto3's standard credential chain: environment/shared config, web identity
+(including GitHub OIDC), container or instance roles, and SSO profiles. It does
+not accept AWS access keys. `model=` and `endpoint_name=` are required: the
+endpoint selects the deployed model specification, while the request model is
+checked against it so a routing mistake fails closed. `auto` mode never selects
+SageMaker.
+
+SageMaker's request is the same Nori JSON contract used by the hosted transport,
+sent through `InvokeEndpointWithResponseStream` with `application/json` for all three
+models. The server emits 15-second heartbeat chunks and one final JSON result, which
+the client buffers into the normal `predict()` return value. This lets large 30M
+requests use SageMaker's streaming processing window (up to eight minutes) instead of
+the regular invocation's 60-second limit. Container errors retain
+their original status/message through the normal Synthefy exception hierarchy;
+AWS credential, signing, region, quota, and throttling errors remain native AWS
+SDK exceptions. The constructor timeout is SageMaker's per-read inactivity timeout,
+not a total stream deadline. Set timeout/retries on the constructor. HTTP-only
+`extra_headers=` are rejected for SageMaker. Per-call `timeout=` is ignored with
+a warning.
+
+Streaming does not increase `InvokeEndpointWithResponseStream`'s 6,291,456-byte
+request-body limit. The client checks the final encoded JSON before invoking the
+endpoint. It does not split oversized tables because every query must use the same
+complete in-context training set, so splitting can change the prediction. The planned
+large-input path is an explicit S3-backed SageMaker Asynchronous Inference API rather
+than a silent fallback; [AWS documents](https://docs.aws.amazon.com/sagemaker/latest/dg/async-inference.html)
+payloads up to 1 GB and processing up to one hour for that service.
 
 ### Local Usage (`mode="local"`, Optional, No Network)
 
@@ -634,15 +693,15 @@ continuous mean is already optimal for those metrics.
 
 ### SynthefyNoriClient (Tabular Regression)
 
-- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None)` — `model` is **required** (`"nori-30m"` / `"nori-6m"`; `None` for a single-model endpoint of your own)
+- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None, endpoint_name=None, region_name=None)` — `model` is **required everywhere** and accepts the three released Nori variants (`nori-6m`, `nori-30m`, and `nori-30m-thinking-medium`) or an explicit custom HTTP slug; there is no `None`/default model path. SageMaker uses response streaming for all three so large 30M requests can run beyond the regular-response limit while `predict()` still returns one normal result.
   - `mode`: `"remote"` (hosted, default), `"local"` (in-process via
-    `synthefy-nori`), or `"auto"` (local if installed, else remote).
+    `synthefy-nori`), `"auto"` (local if installed, else remote), or
+    `"sagemaker"` (a named SageMaker endpoint using the AWS credential chain).
   - `api_key` (remote mode) falls back to the `SYNTHEFY_NORI_API_KEY`
     environment variable. Not required in local mode.
   - Hosted Nori is reached by gateway slug — that is the path Synthefy meters,
     rate-limits and grants per key. To target a single-model endpoint you host
-    yourself, pass your own `base_url`/`endpoint` with `model=None`, which omits
-    `"model"` from the request body.
+    yourself, pass your own `base_url`/`endpoint` and an explicit custom model slug.
 - `predict(X_train, y_train, X_test, task="regression", *, output_type="mean", quantiles=None, text_columns=None, svd_dim=128, embedder="minilm", text_device="auto", timeout=None, extra_headers=None) -> List[float]`
   - Returns one predicted value per row of `X_test`. `timeout`/`extra_headers`
     apply to remote mode only.
