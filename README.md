@@ -470,7 +470,7 @@ not a total stream deadline. Set timeout/retries on the constructor. HTTP-only
 `extra_headers=` are rejected for SageMaker. Per-call `timeout=` is ignored with
 a warning.
 
-Streaming does not increase `InvokeEndpointWithResponseStream`'s 6,291,456-byte
+Streaming does not increase AWS Marketplace's 25,000,000-byte SageMaker endpoint
 request-body limit. The client checks the final encoded JSON before invoking the
 endpoint. It does not split oversized tables because every query must use the same
 complete in-context training set, so splitting can change the prediction. The planned
