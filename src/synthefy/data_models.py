@@ -54,6 +54,7 @@ class NoriPredictRequest(BaseModel):
     memory_policy: Optional[MemoryPolicyInput] = None
     output_type: Optional[str] = None
     quantiles: Optional[List[float]] = None
+    ci_negative_control: Optional[str] = None
 
     def to_wire(self) -> Dict[str, Any]:
         """Serialize the request without pinning optional server defaults.
