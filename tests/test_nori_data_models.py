@@ -49,6 +49,9 @@ requires_library = pytest.mark.skipif(
 #: the library's openapi generator, which is the one place that split is written down.
 DECIDED_FIELDS = {"rung", "est_cache_gb", "resident_gb", "query_chunk", "dropped_context_rows"}
 
+#: Estimator-only state that shared serving deliberately does not accept on the wire.
+LOCAL_ONLY_FIELDS = {"reuse_context_cache"}
+
 
 # ------------------------------------------------- the mirror stands on its own
 def test_the_policy_rejects_unknown_fields_like_the_server_does():
@@ -94,7 +97,7 @@ def test_defaults_match_the_documented_behaviour():
 def test_the_policy_fields_match_the_library_exactly():
     from synthefy_nori.inference.memory_policy import MemoryPolicy as Authoritative
 
-    theirs = set(Authoritative.model_fields) - DECIDED_FIELDS
+    theirs = set(Authoritative.model_fields) - DECIDED_FIELDS - LOCAL_ONLY_FIELDS
     ours = set(MemoryPolicy.model_fields)
     assert ours == theirs, (
         f"the client's MemoryPolicy drifted: missing={sorted(theirs - ours)}, "

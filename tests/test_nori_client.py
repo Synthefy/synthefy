@@ -2558,6 +2558,7 @@ def _fake_regressor_class(seen: Dict, *, with_model=True, with_output_type=True)
     """
     if with_model:
         def __init__(self, model=None, memory_policy=None):
+            seen["instances"] = seen.get("instances", 0) + 1
             seen["init_model"] = model
             seen["init_memory_policy"] = memory_policy
     else:
@@ -2683,6 +2684,41 @@ def test_local_mean_still_uses_the_functional_predict(monkeypatch):
     monkeypatch.setattr("synthefy.nori_client._load_local_regressor", _boom)
     client = SynthefyNoriClient(mode="local", model="nori-30m")
     assert client.predict(_XTR, _YTR, _XTE) == [7.0]
+
+
+def test_local_context_reuse_is_explicit_and_retains_one_estimator(monkeypatch):
+    seen: Dict = {}
+    monkeypatch.setattr(
+        "synthefy.nori_client._load_local_regressor",
+        lambda: _fake_regressor_class(seen),
+    )
+    client = SynthefyNoriClient(
+        mode="local", model="nori-30m", reuse_context_cache=True,
+    )
+
+    first = client.predict(_XTR, _YTR, _XTE, memory_policy="exact")
+    second = client.predict(_XTR, _YTR, _XTE, memory_policy="exact")
+
+    assert first == second == [0.0]
+    assert seen["instances"] == 1
+    policy = seen["init_memory_policy"]
+    assert policy.reuse_context_cache is True
+    assert policy.allow_quantization is False
+
+    client.close()
+    assert client._local_regressor is None
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"mode": "remote", "api_key": "test-key"},
+        {"mode": "sagemaker", "endpoint_name": "nori-dev"},
+    ],
+)
+def test_context_reuse_rejects_shared_serving_modes(kwargs):
+    with pytest.raises(ValueError, match="only supported.*local"):
+        SynthefyNoriClient(model="nori-30m", reuse_context_cache=True, **kwargs)
 
 
 def test_local_quantiles_as_pandas_frame(monkeypatch):

@@ -488,7 +488,7 @@ package. Install the extra:
 pip install "synthefy[local]"
 ```
 
-The `local` extra uses `synthefy-nori>=0.13.1`, which makes recoverable SVD
+The `local` extra uses `synthefy-nori>=0.16.0`, which makes recoverable SVD
 fallbacks visible while supporting Python >= 3.9, the same floor as the base package.
 
 ```python
@@ -507,7 +507,7 @@ is imported lazily on first use; if it is not installed, a clear `ImportError` i
 raised telling you to `pip install "synthefy[local]"`.
 
 Local mode also preserves `synthefy-nori`'s degradation warnings and their messages.
-With `synthefy-nori>=0.13.1`, an SVD failure warns under `SvdFallbackWarning` while
+With `synthefy-nori>=0.16.0`, an SVD failure warns under `SvdFallbackWarning` while
 still returning a prediction. Scored or audited runs can turn that warning into an
 exception around the client call; the client does not catch, wrap, or rewrite it:
 
@@ -517,6 +517,18 @@ from synthefy_nori import SvdFallbackWarning, strict_pipeline
 with strict_pipeline(SvdFallbackWarning):
     predictions = client.predict(X_train, y_train, X_test)
 ```
+
+For repeated predictions against the same context, opt into retaining its encoded
+K/V cache on that local client:
+
+```python
+client = SynthefyNoriClient(
+    mode="local", model="nori-30m", reuse_context_cache=True,
+)
+```
+
+Reuse occurs only when the context and cache parameters are exactly unchanged.
+Hosted and SageMaker clients reject this local-only option.
 
 Use `mode="auto"` to prefer local when `synthefy-nori` is installed and
 transparently fall back to the hosted endpoint (which then requires an API key)
@@ -693,7 +705,7 @@ continuous mean is already optimal for those metrics.
 
 ### SynthefyNoriClient (Tabular Regression)
 
-- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None, endpoint_name=None, region_name=None)` — `model` is **required everywhere** and accepts the three released Nori variants (`nori-6m`, `nori-30m`, and `nori-30m-thinking-medium`) or an explicit custom HTTP slug; there is no `None`/default model path. SageMaker uses response streaming for all three so large 30M requests can run beyond the regular-response limit while `predict()` still returns one normal result.
+- `SynthefyNoriClient(api_key=None, *, mode="remote", ..., model, reuse_context_cache=False)` — `model` is **required everywhere** and accepts the three released Nori variants (`nori-6m`, `nori-30m`, and `nori-30m-thinking-medium`) or an explicit custom HTTP slug; there is no `None`/default model path. SageMaker uses response streaming for all three so large 30M requests can run beyond the regular-response limit while `predict()` still returns one normal result.
   - `mode`: `"remote"` (hosted, default), `"local"` (in-process via
     `synthefy-nori`), `"auto"` (local if installed, else remote), or
     `"sagemaker"` (a named SageMaker endpoint using the AWS credential chain).

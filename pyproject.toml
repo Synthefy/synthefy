@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "synthefy"
-version = "6.3.0"
+version = "6.3.1"
 description = "Python client for the Synthefy API: time-series forecasting and Nori in-context tabular regression"
 readme = "README.md"
 license = {text = "MIT"}
@@ -41,9 +41,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # Optional local inference for SynthefyNoriClient(mode="local"/"auto").
-# synthefy-nori >=0.13.1 makes recoverable SVD fallbacks visible to local-mode callers and
+# synthefy-nori >=0.16.0 adds opt-in cross-call context reuse and keeps SVD fallbacks visible;
 # supports Python >=3.9, matching this package's floor, so no environment marker is needed.
-local = ["synthefy-nori>=0.13.1"]
+local = ["synthefy-nori>=0.16.0"]
 # Client-side text embedding for predict(text_columns=...): reuses synthefy-nori's
 # MultimodalPreprocessor + sentence-transformers to widen text into numeric SVD
 # features before the request. Needs the version that ships text_features.
