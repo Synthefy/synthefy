@@ -31,6 +31,7 @@ from synthefy.data_models import NoriPredictRequest, NoriPredictResponse
 from synthefy.nori_client import (
     GATEWAY_ENDPOINT,
     NORI_VARIANTS,
+    SAGEMAKER_MAX_BODY_BYTES,
     _is_thinking_model,
     _nullable_matrix,
     _resolve_remote_levels,
@@ -414,6 +415,12 @@ def test_aws_constructor_and_predict_reject_transport_mismatches(monkeypatch):
     monkeypatch.setattr(module, "SAGEMAKER_MAX_BODY_BYTES", 1)
     with pytest.raises(ValueError, match="exceeding InvokeEndpoint"):
         client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
+
+
+def test_sagemaker_body_limit_matches_marketplace_runtime():
+    # AWS Marketplace documents 25 MB as non-adjustable; a live runtime probe pins the decimal
+    # byte boundary (25,000,000 is accepted, 25,000,001 returns HTTP 413).
+    assert SAGEMAKER_MAX_BODY_BYTES == 25_000_000
 
 
 # --------------------------------------------------------------------------- #
