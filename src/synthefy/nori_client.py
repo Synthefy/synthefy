@@ -1135,6 +1135,9 @@ class SynthefyNoriClient:
     region_name : str or None, optional
         AWS region for SageMaker. If omitted, boto3 resolves it from
         the standard environment/shared-config chain.
+    reuse_context_cache : bool, default False
+        Retain an unchanged encoded context across calls on this client. This is
+        an explicit local-mode optimization; hosted and SageMaker clients reject it.
 
     Attributes
     ----------
@@ -1188,6 +1191,7 @@ class SynthefyNoriClient:
         user_agent: Optional[str] = None,
         endpoint_name: Optional[str] = None,
         region_name: Optional[str] = None,
+        reuse_context_cache: bool = False,
     ) -> None:
         if mode not in _VALID_MODES:
             raise ValueError(
@@ -1222,6 +1226,14 @@ class SynthefyNoriClient:
         if mode == "auto":
             mode = "local" if _local_available() else "remote"
         self.mode: str = mode
+        if not isinstance(reuse_context_cache, bool):
+            raise ValueError("reuse_context_cache must be True or False")
+        if reuse_context_cache and mode != "local":
+            raise ValueError(
+                "reuse_context_cache=True is only supported when mode resolves to 'local'"
+            )
+        self.reuse_context_cache = reuse_context_cache
+        self._local_regressor: Optional[Any] = None
 
         canonical_model = _canonical_model_name(model)
         if mode == "sagemaker" and canonical_model not in SAGEMAKER_VARIANTS:
@@ -1313,6 +1325,7 @@ class SynthefyNoriClient:
         self.close()
 
     def close(self) -> None:
+        self._local_regressor = None
         if self.client is not None:
             try:
                 self.client.close()
@@ -1699,6 +1712,8 @@ class SynthefyNoriClient:
         *,
         output_type: str,
         quantile_levels: Optional[List[float]],
+        discretize: Optional[str] = None,
+        categorical_levels: Optional[VectorLike] = None,
     ) -> Any:
         """Run local inference through :class:`NoriRegressor` for a non-default ``output_type``.
 
@@ -1729,7 +1744,8 @@ class SynthefyNoriClient:
                     'pip install -U "synthefy[local]".'
                 )
             init_kwargs["model"] = self._local_variant
-        if request.memory_policy is not None:
+        memory_policy: Any = request.memory_policy
+        if memory_policy is not None:
             if not _local_memory_policy_available():
                 raise ImportError(
                     "memory_policy= requires synthefy-nori >= 0.13.0 (the serving-memory policy). "
@@ -1737,16 +1753,41 @@ class SynthefyNoriClient:
                 )
             # NoriRegressor belongs to another package and expects its own MemoryPolicy
             # class (or a plain input), not this client's equivalent pydantic class.
-            init_kwargs["memory_policy"] = (
-                request.memory_policy
-                if isinstance(request.memory_policy, str)
-                else request.memory_policy.model_dump(exclude_unset=True)
+            memory_policy = (
+                memory_policy
+                if isinstance(memory_policy, str)
+                else memory_policy.model_dump(exclude_unset=True)
             )
-        regressor = regressor_cls(**init_kwargs)
+        if self.reuse_context_cache:
+            try:
+                from synthefy_nori.inference.memory_policy import MemoryPolicy
+            except ImportError as exc:
+                raise ImportError(
+                    "reuse_context_cache=True requires synthefy-nori>=0.16.0"
+                ) from exc
+            fields = MemoryPolicy.coerce(memory_policy).model_dump(exclude_unset=True)
+            fields["reuse_context_cache"] = True
+            memory_policy = MemoryPolicy(**fields)
+
+        if memory_policy is not None:
+            init_kwargs["memory_policy"] = memory_policy
+        regressor = self._local_regressor if self.reuse_context_cache else None
+        if regressor is None:
+            regressor = regressor_cls(**init_kwargs)
+            if self.reuse_context_cache:
+                self._local_regressor = regressor
+        else:
+            regressor.memory_policy = memory_policy
         regressor.fit(request.X_train, request.y_train)
-        return regressor.predict(
-            request.X_test, output_type=output_type, quantiles=quantile_levels
-        )
+        predict_kwargs: Dict[str, Any] = {
+            "output_type": output_type,
+            "quantiles": quantile_levels,
+        }
+        if discretize is not None:
+            predict_kwargs["discretize"] = discretize
+        if categorical_levels is not None:
+            predict_kwargs["categorical_levels"] = categorical_levels
+        return regressor.predict(request.X_test, **predict_kwargs)
 
     def _predict_local_distribution(
         self,
@@ -1794,13 +1835,20 @@ class SynthefyNoriClient:
         discretize: Optional[str] = None,
         categorical_levels: Optional[VectorLike] = None,
     ) -> List[float]:
-        if output_type != DEFAULT_OUTPUT_TYPE:
+        if self.reuse_context_cache and request.task not in ("regression", "reg"):
+            raise ValueError(f"Unsupported task: {request.task!r}")
+
+        if output_type != DEFAULT_OUTPUT_TYPE or self.reuse_context_cache:
             # "median" is a point output but still needs the estimator API
             # (see _local_regressor_predict). Discretization cannot reach here:
             # _validate_output_type rejects that combination up front.
             return _as_float_list(
                 self._local_regressor_predict(
-                    request, output_type=output_type, quantile_levels=None
+                    request,
+                    output_type=output_type,
+                    quantile_levels=None,
+                    discretize=discretize,
+                    categorical_levels=categorical_levels,
                 )
             )
         local_predict = _load_local_predict()

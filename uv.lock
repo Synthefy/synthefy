@@ -3545,7 +3545,7 @@ wheels = [
 
 [[package]]
 name = "synthefy"
-version = "6.3.0"
+version = "6.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -3589,7 +3589,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.20.0" },
     { name = "pandas", specifier = ">=1.3.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "synthefy-nori", marker = "extra == 'local'", specifier = ">=0.13.1" },
+    { name = "synthefy-nori", marker = "extra == 'local'", specifier = ">=0.16.0" },
     { name = "synthefy-nori", extras = ["text"], marker = "extra == 'text'", specifier = ">=0.12.0" },
 ]
 provides-extras = ["local", "text", "aws"]
@@ -3605,7 +3605,7 @@ dev = [
 
 [[package]]
 name = "synthefy-nori"
-version = "0.13.1"
+version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "einops" },
@@ -3630,9 +3630,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c4/45/ed0dd2b1aa1f5c290a7f8588ec3ffadc2751e01c08f2bc189511415cf7bf/synthefy_nori-0.13.1.tar.gz", hash = "sha256:5cb9fbf0a22c70b92d8ca90f46e7b398c5a6e62066ed98343f49712daef78b72", size = 375305, upload-time = "2026-08-04T03:46:36.401Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c4/82/a340696ef5ef0c0089ab5edbc89b22ae490ace8ada5a0294d5fdecc827cf/synthefy_nori-0.16.0.tar.gz", hash = "sha256:73e54db5467b050e1c34a39fe131a32bd9468c96cbb9f380e9f526bd252923b1", size = 433785, upload-time = "2026-08-06T03:09:37.581Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2f/b9/53e31e97ae0635a2d837422a4600bf84bb4c482e597867b8f2d92be43da7/synthefy_nori-0.13.1-py3-none-any.whl", hash = "sha256:f4b3173304d9c7b2ef21d1947e68a89e03182d0fecd6a84607c08b37915dc06d", size = 328716, upload-time = "2026-08-04T03:46:34.672Z" },
+    { url = "https://files.pythonhosted.org/packages/2a/71/4df29c02d14eedf5ce7d443ab4e286d624098533be3143229953fb835a95/synthefy_nori-0.16.0-py3-none-any.whl", hash = "sha256:9f28015b59090a3499463d289b9e891de1016e81c6715299073ca71066f34ee3", size = 371448, upload-time = "2026-08-06T03:09:35.791Z" },
 ]
 
 [package.optional-dependencies]
