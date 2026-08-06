@@ -165,9 +165,11 @@ DEFAULT_OUTPUT_TYPE = "mean"
 Mode = Literal["remote", "local", "auto", "sagemaker"]
 _VALID_MODES = ("remote", "local", "auto", "sagemaker")
 
-# SageMaker Runtime's InvokeEndpointWithResponseStream request-body limit. Check it locally so a
-# caller gets a deterministic error before signing or sending a paid request.
-SAGEMAKER_MAX_BODY_BYTES = 6_291_456
+# AWS Marketplace's SageMaker endpoint request-body limit. The live runtime accepts exactly
+# 25,000,000 bytes and returns HTTP 413 at 25,000,001 for response-stream invocations; the
+# operation-specific API reference still shows the older 6 MiB value. Check the current service
+# limit locally so a caller gets a deterministic error before signing or sending a paid request.
+SAGEMAKER_MAX_BODY_BYTES = 25_000_000
 
 # Authorization header scheme for remote requests. The Baseten inference *gateway* accepts only
 # ``Bearer``, which is why it is the default. ``Api-Key`` exists for a caller who points

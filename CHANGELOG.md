@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   large 30M requests to run beyond regular invocation's 60-second limit while the
   synchronous client still returns one final typed result.
 - SageMaker requests fail locally before invocation when their encoded body exceeds
-  `InvokeEndpointWithResponseStream`'s 6,291,456-byte limit; oversized tables require
+  AWS Marketplace's 25,000,000-byte endpoint limit; oversized tables require
   the planned explicit S3-backed asynchronous API rather than semantic-changing splits.
 
 ## [6.2.2]
