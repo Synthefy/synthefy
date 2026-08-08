@@ -427,7 +427,7 @@ The Nori client reuses the package's
 
 ### Amazon SageMaker Usage (`mode="sagemaker"`)
 
-Install the optional AWS transport and invoke a named real-time endpoint:
+Install the optional AWS transport and invoke one asynchronous endpoint:
 
 ```bash
 pip install "synthefy[aws]"
@@ -439,8 +439,9 @@ from synthefy import SynthefyNoriClient
 client = SynthefyNoriClient(
     mode="sagemaker",
     model="nori-30m",
-    endpoint_name="nori-30m-prod",
+    endpoint_name="nori-prod",
     region_name="us-east-1",
+    s3_staging_uri="s3://customer-bucket/nori/inputs/",
 )
 predictions = client.predict(
     X_train=[[0.0], [1.0]],
@@ -452,31 +453,31 @@ predictions = client.predict(
 The client creates an argument-free `boto3.Session()` and therefore uses
 boto3's standard credential chain: environment/shared config, web identity
 (including GitHub OIDC), container or instance roles, and SSO profiles. It does
-not accept AWS access keys. `model=` and `endpoint_name=` are required: the
-endpoint selects the deployed model specification, while the request model is
-checked against it so a routing mistake fails closed. `auto` mode never selects
-SageMaker.
+not accept AWS access keys. `model=`, `endpoint_name=`, and `s3_staging_uri=` are
+required. All three peer models are selected in the request and served by the same
+application and endpoint; there is no primary model. `auto` mode never selects SageMaker.
 
-SageMaker's request is the same Nori JSON contract used by the hosted transport,
-sent through `InvokeEndpointWithResponseStream` with `application/json` for all three
-models. The server emits 15-second heartbeat chunks and one final JSON result, which
-the client buffers into the normal `predict()` return value. This lets large 30M
-requests use SageMaker's streaming processing window (up to eight minutes) instead of
-the regular invocation's 60-second limit. Container errors retain
-their original status/message through the normal Synthefy exception hierarchy;
-AWS credential, signing, region, quota, and throttling errors remain native AWS
-SDK exceptions. The constructor timeout is SageMaker's per-read inactivity timeout,
-not a total stream deadline. Set timeout/retries on the constructor. HTTP-only
-`extra_headers=` are rejected for SageMaker. Per-call `timeout=` is ignored with
-a warning.
+Every request uses one path: the client writes a compact, host-neutral tensor file,
+uploads it below the customer-owned staging prefix, calls `InvokeEndpointAsync`, waits for
+the output or failure object, and returns the ordinary `predict()` result. It deletes only
+the input/output/failure keys associated with that invocation in `finally` cleanup. The
+client does not create buckets. A client timeout does not cancel queued AWS work; because
+cleanup still removes the temporary input, a request that SageMaker has not downloaded may
+subsequently fail server-side.
 
-Streaming does not increase AWS Marketplace's 25,000,000-byte SageMaker endpoint
-request-body limit. The client checks the final encoded JSON before invoking the
-endpoint. It does not split oversized tables because every query must use the same
-complete in-context training set, so splitting can change the prediction. The planned
-large-input path is an explicit S3-backed SageMaker Asynchronous Inference API rather
-than a silent fallback; [AWS documents](https://docs.aws.amazon.com/sagemaker/latest/dg/async-inference.html)
-payloads up to 1 GB and processing up to one hour for that service.
+[SageMaker Asynchronous Inference](https://docs.aws.amazon.com/sagemaker/latest/dg/async-inference.html)
+accepts S3-backed inputs up to 1 GB, and an individual invocation can run for up to one
+hour. These are AWS transport limits, not a promise that every 1 GB table fits CPU or GPU
+memory. Table shape, parsing, model activations, output size, and the selected instance
+determine the practical limit. SageMaker has no response-streaming path in this client.
+Snowflake and self-hosted ingress limits are separate.
+
+The invoking identity needs `sagemaker:InvokeEndpointAsync` on the named endpoint plus
+`s3:PutObject`, `s3:GetObject`, and `s3:DeleteObject` on the configured input, output, and
+failure prefixes. The endpoint execution role separately needs input read and output/failure
+write access. Add narrowly scoped KMS permissions only when those objects use a customer key.
+HTTP-only `extra_headers=` are rejected; per-call `timeout=` is ignored with a warning, so
+set polling and network timeout on the constructor.
 
 ### Local Usage (`mode="local"`, Optional, No Network)
 
@@ -693,7 +694,7 @@ continuous mean is already optimal for those metrics.
 
 ### SynthefyNoriClient (Tabular Regression)
 
-- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None, endpoint_name=None, region_name=None)` — `model` is **required everywhere** and accepts the three released Nori variants (`nori-6m`, `nori-30m`, and `nori-30m-thinking-medium`) or an explicit custom HTTP slug; there is no `None`/default model path. SageMaker uses response streaming for all three so large 30M requests can run beyond the regular-response limit while `predict()` still returns one normal result.
+- `SynthefyNoriClient(api_key=None, *, mode="remote", timeout=300.0, max_retries=2, base_url=..., endpoint=..., model, user_agent=None, endpoint_name=None, region_name=None, s3_staging_uri=None)` — `model` is **required everywhere** and accepts the three released Nori variants (`nori-6m`, `nori-30m`, and `nori-30m-thinking-medium`) or an explicit custom HTTP slug; there is no `None`/default model path. SageMaker stages every request in S3 and blocks on one asynchronous endpoint until the result is ready.
   - `mode`: `"remote"` (hosted, default), `"local"` (in-process via
     `synthefy-nori`), `"auto"` (local if installed, else remote), or
     `"sagemaker"` (a named SageMaker endpoint using the AWS credential chain).

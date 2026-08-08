@@ -16,8 +16,8 @@ A single :class:`SynthefyNoriClient` runs predictions in one of four modes,
 selected with the ``mode`` constructor argument:
 
 - ``"remote"`` (default) -- calls the hosted Baseten endpoint over HTTPS.
-- ``"sagemaker"`` -- invokes a named Amazon SageMaker endpoint with AWS Signature V4,
-  using boto3's standard credential chain.
+- ``"sagemaker"`` -- stages every request in customer-owned S3 and submits it to one
+  asynchronous SageMaker endpoint with boto3's standard credential chain.
 - ``"local"`` -- runs the same prediction in-process via the optional
   ``synthefy-nori`` package (``pip install "synthefy[local]"``), no network and
   no API key.
@@ -28,9 +28,15 @@ selected with the ``mode`` constructor argument:
 import importlib.util
 import json
 import os
+import random
+import tempfile
 import time
+import uuid
 import warnings
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
+from urllib.parse import urlparse
 
 import httpx
 import numpy as np
@@ -41,8 +47,11 @@ from synthefy.nori_data_models import MemoryPolicyInput
 from synthefy.api_client import (
     APIConnectionError,
     APITimeoutError,
+    SageMakerInvocationError,
     _raise_for_status,
 )
+from synthefy.nori_payload import CONTENT_TYPE as NORI_BINARY_CONTENT_TYPE
+from synthefy.nori_payload import MAX_PAYLOAD_BYTES, save_request as save_nori_request
 
 # Gateway endpoint (default): routes to the model by name, body carries "model".
 GATEWAY_BASE_URL = "https://inference.baseten.co"
@@ -84,9 +93,9 @@ NORI_VARIANTS = {
 # variants are added. Friendly names only (the "synthefy/..." raw slugs are aliases, not listed).
 _MODEL_NAMES = tuple(name for name in NORI_VARIANTS if "/" not in name)
 
-# SageMaker Marketplace publishes these exact named inference specifications. A SageMaker
-# endpoint is created from one specification; the client sends the same canonical name so the
-# container can fail closed if an endpoint and requested model do not match.
+# The shared SageMaker application accepts these three peer model names. The client sends the
+# canonical name in the tensor-file metadata, and verifies the response identity so one endpoint
+# cannot silently answer with a different peer model.
 SAGEMAKER_VARIANTS = tuple(_MODEL_NAMES)
 
 
@@ -165,11 +174,13 @@ DEFAULT_OUTPUT_TYPE = "mean"
 Mode = Literal["remote", "local", "auto", "sagemaker"]
 _VALID_MODES = ("remote", "local", "auto", "sagemaker")
 
-# AWS Marketplace's SageMaker endpoint request-body limit. The live runtime accepts exactly
-# 25,000,000 bytes and returns HTTP 413 at 25,000,001 for response-stream invocations; the
-# operation-specific API reference still shows the older 6 MiB value. Check the current service
-# limit locally so a caller gets a deterministic error before signing or sending a paid request.
-SAGEMAKER_MAX_BODY_BYTES = 25_000_000
+# SageMaker Asynchronous Inference accepts an S3-backed request object up to 1 GB. This is
+# deliberately a serialized-file limit, not an increase to the removed real-time body limit.
+SAGEMAKER_MAX_INPUT_BYTES = MAX_PAYLOAD_BYTES
+_SAGEMAKER_REQUEST_TTL_SECONDS = 21_600
+_SAGEMAKER_INVOCATION_TIMEOUT_SECONDS = 3_600
+_SAGEMAKER_POLL_INITIAL_SECONDS = 0.25
+_SAGEMAKER_POLL_MAX_SECONDS = 5.0
 
 # Authorization header scheme for remote requests. The Baseten inference *gateway* accepts only
 # ``Bearer``, which is why it is the default. ``Api-Key`` exists for a caller who points
@@ -184,6 +195,37 @@ MatrixLike = Union[Sequence[Sequence[float]], np.ndarray, pd.DataFrame]
 VectorLike = Union[Sequence[float], np.ndarray, pd.Series, pd.DataFrame]
 
 
+@dataclass
+class _NoriArrayRequest:
+    """Private array-backed equivalent of the public JSON request model."""
+
+    X_train: np.ndarray
+    y_train: np.ndarray
+    X_test: np.ndarray
+    task: str
+    memory_policy: Optional[MemoryPolicyInput] = None
+    output_type: Optional[str] = None
+    quantiles: Optional[List[float]] = None
+
+
+def _parse_s3_uri(uri: str, *, require_prefix: bool = False) -> Tuple[str, str]:
+    parsed = urlparse(uri)
+    if parsed.scheme != "s3" or not parsed.netloc or parsed.query or parsed.fragment:
+        raise ValueError("s3_staging_uri must be an s3://bucket/prefix URI")
+    key = parsed.path.lstrip("/").rstrip("/")
+    if require_prefix and not key:
+        raise ValueError(
+            "s3_staging_uri must include a customer-owned prefix, not only a bucket"
+        )
+    return parsed.netloc, key
+
+
+def _is_missing_s3_object(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    error = response.get("Error", {}) if isinstance(response, dict) else {}
+    return str(error.get("Code", "")) in {"404", "NoSuchKey", "NotFound"}
+
+
 def _load_aws_sdk() -> Tuple[Any, Any]:
     """Load the optional AWS SDK only when a SageMaker deployment is selected."""
     try:
@@ -192,19 +234,19 @@ def _load_aws_sdk() -> Tuple[Any, Any]:
     except ImportError as exc:  # pragma: no cover - exercised without the extra
         raise ImportError(
             "A SageMaker deployment needs the AWS extra: install "
-            "`pip install \"synthefy[aws]\"`."
+            '`pip install "synthefy[aws]"`.'
         ) from exc
     return boto3, Config
 
 
-def _create_sagemaker_runtime_client(
+def _create_sagemaker_clients(
     *,
     region_name: Optional[str],
     timeout: float,
     max_retries: int,
     user_agent_extra: str,
-) -> Any:
-    """Create a SageMaker Runtime client through boto3's credential chain.
+) -> Tuple[Any, Any]:
+    """Create SageMaker Runtime and S3 clients through boto3's credential chain.
 
     Deliberately constructs an argument-free ``Session``: environment variables,
     shared config/credentials, web identity (including GitHub OIDC), ECS/EC2 role
@@ -218,11 +260,12 @@ def _create_sagemaker_runtime_client(
         retries={"mode": "standard", "total_max_attempts": max_retries + 1},
         user_agent_extra=user_agent_extra,
     )
-    return boto3.Session().client(
-        "sagemaker-runtime",
-        region_name=region_name,
-        config=config,
+    session = boto3.Session()
+    runtime = session.client(
+        "sagemaker-runtime", region_name=region_name, config=config
     )
+    s3 = session.client("s3", region_name=region_name, config=config)
+    return runtime, s3
 
 
 def _frame_columns(arr: Any) -> Optional[List[Any]]:
@@ -278,7 +321,9 @@ def _reject_non_numeric_columns(frame: pd.DataFrame, name: str) -> None:
         )
 
 
-def _coerce_matrix(arr: MatrixLike, name: str) -> np.ndarray:
+def _coerce_matrix(
+    arr: MatrixLike, name: str, *, dtype: Any = np.float64
+) -> np.ndarray:
     """Coerce an array-like into a 2D float ``np.ndarray`` or raise ``ValueError``.
 
     Accepts nested Python sequences, numpy arrays, and pandas DataFrames. A
@@ -288,10 +333,10 @@ def _coerce_matrix(arr: MatrixLike, name: str) -> np.ndarray:
     """
     if isinstance(arr, pd.DataFrame):
         _reject_non_numeric_columns(arr, name)
-        matrix = arr.to_numpy(dtype=float)
+        matrix = arr.to_numpy(dtype=dtype)
     else:
         try:
-            matrix = np.asarray(arr, dtype=float)
+            matrix = np.asarray(arr, dtype=dtype)
         except (ValueError, TypeError) as exc:
             raise ValueError(
                 f"{name} must be a numeric 2D array/list with equal-length rows; "
@@ -307,7 +352,9 @@ def _coerce_matrix(arr: MatrixLike, name: str) -> np.ndarray:
     return matrix
 
 
-def _coerce_vector(arr: VectorLike, name: str) -> np.ndarray:
+def _coerce_vector(
+    arr: VectorLike, name: str, *, dtype: Any = np.float64
+) -> np.ndarray:
     """Coerce an array-like into a 1D float ``np.ndarray`` or raise ``ValueError``.
 
     Accepts nested Python sequences, numpy arrays, a pandas Series, or a
@@ -321,17 +368,16 @@ def _coerce_vector(arr: VectorLike, name: str) -> np.ndarray:
                 "columns. Pass a single column (a Series) for the targets."
             )
         _reject_non_numeric_columns(arr, name)
-        vector = arr.to_numpy(dtype=float).reshape(-1)
+        vector = arr.to_numpy(dtype=dtype).reshape(-1)
     elif isinstance(arr, pd.Series):
         if not pd.api.types.is_numeric_dtype(arr):
             raise ValueError(
-                f"{name} must be numeric; got a non-numeric Series "
-                f"(dtype {arr.dtype})."
+                f"{name} must be numeric; got a non-numeric Series (dtype {arr.dtype})."
             )
-        vector = arr.to_numpy(dtype=float)
+        vector = arr.to_numpy(dtype=dtype)
     else:
         try:
-            vector = np.asarray(arr, dtype=float)
+            vector = np.asarray(arr, dtype=dtype)
         except (ValueError, TypeError) as exc:
             raise ValueError(
                 f"{name} must be a numeric 1D array/list; got error: {exc}"
@@ -361,9 +407,7 @@ _CATEGORICAL_ENCODINGS = ("ordinal", "onehot")
 
 def _has_encodable_columns(frame: pd.DataFrame) -> bool:
     """``True`` if any column is non-numeric (so featurization is needed)."""
-    return any(
-        not pd.api.types.is_numeric_dtype(frame[col]) for col in frame.columns
-    )
+    return any(not pd.api.types.is_numeric_dtype(frame[col]) for col in frame.columns)
 
 
 def _numeric_categories_to_values(frame: pd.DataFrame) -> pd.DataFrame:
@@ -389,7 +433,9 @@ def _numeric_categories_to_values(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _featurize_frames(
-    X_train: pd.DataFrame, X_test: pd.DataFrame, max_cardinality: int,
+    X_train: pd.DataFrame,
+    X_test: pd.DataFrame,
+    max_cardinality: int,
     encoding: str = _DEFAULT_CATEGORICAL_ENCODING,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Encode non-numeric columns of two aligned frames (fit on train).
@@ -494,9 +540,7 @@ def _featurize_frames(
                 codes = np.full(len(s), np.nan, dtype=np.float64)
                 notna = s.notna()
                 present = s[notna].astype(str).map(mapping)
-                codes[notna.to_numpy()] = (
-                    present.fillna(-1).to_numpy(dtype=np.float64)
-                )
+                codes[notna.to_numpy()] = present.fillna(-1).to_numpy(dtype=np.float64)
                 feat[col] = codes
     elif cat_cols:
         # dummy_na=True gives missing values their own indicator column, so NaN is
@@ -506,8 +550,10 @@ def _featurize_frames(
         # rows (so a legitimate literal "nan" value column doesn't collide with
         # it). Done positionally so a transient duplicate label can't break it.
         train_d = pd.get_dummies(
-            X_train[cat_cols].astype(object), columns=cat_cols,
-            dummy_na=True, dtype=np.uint8,
+            X_train[cat_cols].astype(object),
+            columns=cat_cols,
+            dummy_na=True,
+            dtype=np.uint8,
         )
         train_d = train_d.loc[:, (train_d.to_numpy() != 0).any(axis=0)]
         if train_d.columns.has_duplicates:
@@ -517,21 +563,27 @@ def _featurize_frames(
                 "offending column(s) before calling predict()."
             )
         test_d = pd.get_dummies(
-            X_test[cat_cols].astype(object), columns=cat_cols,
-            dummy_na=True, dtype=np.uint8,
+            X_test[cat_cols].astype(object),
+            columns=cat_cols,
+            dummy_na=True,
+            dtype=np.uint8,
         )
         # Drop test all-zero columns too (e.g. the dummy_na column when X_test has
         # no missing rows) so test_d has no duplicate label before reindex.
         test_d = test_d.loc[:, (test_d.to_numpy() != 0).any(axis=0)]
         test_d = test_d.reindex(columns=train_d.columns, fill_value=0)
         X_train_feat = pd.concat(
-            [X_train[numeric_cols].reset_index(drop=True),
-             train_d.reset_index(drop=True)],
+            [
+                X_train[numeric_cols].reset_index(drop=True),
+                train_d.reset_index(drop=True),
+            ],
             axis=1,
         )
         X_test_feat = pd.concat(
-            [X_test[numeric_cols].reset_index(drop=True),
-             test_d.reset_index(drop=True)],
+            [
+                X_test[numeric_cols].reset_index(drop=True),
+                test_d.reset_index(drop=True),
+            ],
             axis=1,
         )
         if X_train_feat.columns.has_duplicates:
@@ -562,7 +614,8 @@ def _build_nori_request(
     categorical_encoding: str = _DEFAULT_CATEGORICAL_ENCODING,
     output_type: str = DEFAULT_OUTPUT_TYPE,
     quantile_levels: Optional[List[float]] = None,
-) -> NoriPredictRequest:
+    array_backed: bool = False,
+) -> Union[NoriPredictRequest, _NoriArrayRequest]:
     """Validate shapes and build a :class:`NoriPredictRequest`.
 
     Accepts Python lists, numpy arrays, or pandas DataFrames/Series. When both
@@ -636,13 +689,19 @@ def _build_nori_request(
             and (_has_encodable_columns(X_train) or _has_encodable_columns(X_test))
         ):
             X_train, X_test = _featurize_frames(
-                X_train, X_test, max_categorical_cardinality,
+                X_train,
+                X_test,
+                max_categorical_cardinality,
                 encoding=categorical_encoding,
             )
 
-    X_train_arr = _coerce_matrix(X_train, "X_train")
-    X_test_arr = _coerce_matrix(X_test, "X_test")
-    y_train_arr = _coerce_vector(y_train, "y_train")
+    # The compact SageMaker envelope stores features as float32 and targets as float64.
+    # Coercing directly to those dtypes avoids first materialising full float64 feature
+    # matrices and then copying them again while writing a large request file.
+    feature_dtype = np.float32 if array_backed else np.float64
+    X_train_arr = _coerce_matrix(X_train, "X_train", dtype=feature_dtype)
+    X_test_arr = _coerce_matrix(X_test, "X_test", dtype=feature_dtype)
+    y_train_arr = _coerce_vector(y_train, "y_train", dtype=np.float64)
 
     n_context, n_features = X_train_arr.shape
     if n_context == 0:
@@ -664,16 +723,19 @@ def _build_nori_request(
     if not isinstance(task, str) or not task.strip():
         raise ValueError("task must be a non-empty string")
 
-    return NoriPredictRequest(
-        X_train=_nullable_matrix(X_train_arr),
-        y_train=y_train_arr.tolist(),
-        X_test=_nullable_matrix(X_test_arr),
-        task=task,
+    request_values = {
+        "X_train": X_train_arr if array_backed else _nullable_matrix(X_train_arr),
+        "y_train": y_train_arr if array_backed else y_train_arr.tolist(),
+        "X_test": X_test_arr if array_backed else _nullable_matrix(X_test_arr),
+        "task": task,
         # Left as None for the default so the serialized body carries neither
         # field (see _predict_remote's exclude_none dump).
-        output_type=None if output_type == DEFAULT_OUTPUT_TYPE else output_type,
-        quantiles=quantile_levels,
-    )
+        "output_type": None if output_type == DEFAULT_OUTPUT_TYPE else output_type,
+        "quantiles": quantile_levels,
+    }
+    if array_backed:
+        return _NoriArrayRequest(**request_values)
+    return NoriPredictRequest(**request_values)
 
 
 def _as_float_list(values: Any) -> List[float]:
@@ -754,9 +816,7 @@ def _validate_output_type(
             "tau level in (0, 1); got an empty sequence."
         )
     if not np.all(np.isfinite(levels)) or np.any((levels <= 0.0) | (levels >= 1.0)):
-        raise ValueError(
-            f"quantiles must lie strictly in (0, 1); got {quantiles!r}."
-        )
+        raise ValueError(f"quantiles must lie strictly in (0, 1); got {quantiles!r}.")
     return [float(level) for level in levels]
 
 
@@ -869,6 +929,7 @@ def _snap_to_levels(predictions: List[float], levels: "np.ndarray") -> List[floa
 # --------------------------------------------------------------------------- #
 # Distribution output shaping (output_type="quantiles" / "full")
 # --------------------------------------------------------------------------- #
+
 
 def _quantile_frame(
     values: "np.ndarray",
@@ -1048,14 +1109,20 @@ def _widen_text_columns(
         _resolve_text_device(text_device) if isinstance(embedder, str) else None
     )
     mm = MultimodalPreprocessor(
-        text_columns, svd_dim=svd_dim, embedder=embedder,
+        text_columns,
+        svd_dim=svd_dim,
+        embedder=embedder,
         max_cardinality=max_cardinality,
         device=resolved_text_device,
     )
-    Xtr = mm.fit_transform(X_train)   # numeric ndarray (numeric + categorical + text-SVD)
+    Xtr = mm.fit_transform(
+        X_train
+    )  # numeric ndarray (numeric + categorical + text-SVD)
     Xte = mm.transform(X_test)
-    return (pd.DataFrame(Xtr, index=X_train.index),
-            pd.DataFrame(Xte, index=X_test.index))
+    return (
+        pd.DataFrame(Xtr, index=X_train.index),
+        pd.DataFrame(Xte, index=X_test.index),
+    )
 
 
 class SynthefyNoriClient:
@@ -1076,8 +1143,10 @@ class SynthefyNoriClient:
     - ``"auto"``: use ``"local"`` if ``synthefy-nori`` is installed, otherwise
       fall back to ``"remote"`` (which then requires an API key).
     - ``"sagemaker"``: invoke a named Amazon SageMaker endpoint
-      through boto3. Requests are SigV4-signed using boto3's standard credential
-      chain; install the optional dependency with ``pip install "synthefy[aws]"``.
+      asynchronously through boto3. ``predict()`` remains blocking: it stages a compact
+      request in customer-owned S3, waits for SageMaker's output or failure object, and
+      deletes the invocation's temporary objects. Requests are SigV4-signed using boto3's
+      standard credential chain; install ``pip install "synthefy[aws]"``.
 
     For remote mode, the client targets the Baseten inference *gateway*
     (``https://inference.baseten.co/predict``) and includes the chosen size slug (e.g.
@@ -1097,10 +1166,9 @@ class SynthefyNoriClient:
     mode : {"remote", "local", "auto", "sagemaker"}, default "remote"
         How predictions run. See above.
     timeout : float, default 300.0
-        Per-request timeout in seconds for remote HTTP. SageMaker uses it as botocore's
-        per-read inactivity timeout; 15-second server heartbeat chunks allow an active stream
-        to continue up to SageMaker's eight-minute service limit. Per-call overrides are not
-        supported for SageMaker.
+        Per-request timeout in seconds for remote HTTP. For SageMaker this bounds client-side
+        polling as well as boto3 network operations. A client timeout does not cancel work
+        already queued by SageMaker. Per-call overrides are not supported for SageMaker.
     max_retries : int, default 2
         Number of retries for transient errors (timeouts, connection errors,
         429 and 5xx responses). Remote mode uses exponential backoff; SageMaker
@@ -1118,12 +1186,12 @@ class SynthefyNoriClient:
         explicit model identity. Selecting a variant in local mode requires a
         synthefy-nori build with the ``model=`` selector.
         Nori Thinking Medium — ``"nori-30m-thinking-medium"`` — runs only on hosted
-        deployments: passing it with ``mode="local"`` or ``mode="auto"`` raises
+        deployments (remote or SageMaker): passing it with ``mode="local"`` or ``mode="auto"`` raises
         :class:`ValueError` rather
         than silently running the base model — use ``mode="remote"``. Likewise a selector with no
         local checkpoint (an unknown/custom slug) raises in local mode instead of falling back to
-        the base model. SageMaker also requires the model name and verifies it
-        against the model specification used to create the endpoint.
+        the base model. SageMaker sends the model name to the shared application and verifies
+        that the response came from the requested peer model.
     auth_scheme : {"Bearer", "Api-Key"}, default "Bearer"
         HTTP ``Authorization`` scheme prefixed to the API key (remote mode). The
         inference gateway requires ``"Bearer"``; ``"Api-Key"`` is only for a
@@ -1137,6 +1205,9 @@ class SynthefyNoriClient:
     region_name : str or None, optional
         AWS region for SageMaker. If omitted, boto3 resolves it from
         the standard environment/shared-config chain.
+    s3_staging_uri : str or None, optional
+        Customer-owned ``s3://bucket/prefix`` used for temporary SageMaker request
+        objects. Required with ``mode="sagemaker"``. The client never creates a bucket.
 
     Attributes
     ----------
@@ -1172,7 +1243,8 @@ class SynthefyNoriClient:
 
     >>> client = SynthefyNoriClient(  # doctest: +SKIP
     ...     mode="sagemaker", model="nori-30m",
-    ...     endpoint_name="nori-30m-prod", region_name="us-east-1"
+    ...     endpoint_name="nori-prod", region_name="us-east-1",
+    ...     s3_staging_uri="s3://customer-bucket/nori/invocations/",
     ... )
     """
 
@@ -1190,15 +1262,13 @@ class SynthefyNoriClient:
         user_agent: Optional[str] = None,
         endpoint_name: Optional[str] = None,
         region_name: Optional[str] = None,
+        s3_staging_uri: Optional[str] = None,
     ) -> None:
         if mode not in _VALID_MODES:
-            raise ValueError(
-                f"mode must be one of {_VALID_MODES}; got {mode!r}"
-            )
+            raise ValueError(f"mode must be one of {_VALID_MODES}; got {mode!r}")
         if auth_scheme not in _VALID_AUTH_SCHEMES:
             raise ValueError(
-                f"auth_scheme must be one of {_VALID_AUTH_SCHEMES}; "
-                f"got {auth_scheme!r}"
+                f"auth_scheme must be one of {_VALID_AUTH_SCHEMES}; got {auth_scheme!r}"
             )
         if mode == "sagemaker":
             if api_key is not None:
@@ -1207,12 +1277,16 @@ class SynthefyNoriClient:
                     "SigV4-signs with the standard AWS credential chain"
                 )
             if not endpoint_name or not endpoint_name.strip():
-                raise ValueError(
-                    "endpoint_name is required with mode='sagemaker'"
-                )
-        elif endpoint_name is not None or region_name is not None:
+                raise ValueError("endpoint_name is required with mode='sagemaker'")
+            if not s3_staging_uri or not s3_staging_uri.strip():
+                raise ValueError("s3_staging_uri is required with mode='sagemaker'")
+        elif (
+            endpoint_name is not None
+            or region_name is not None
+            or s3_staging_uri is not None
+        ):
             raise ValueError(
-                "endpoint_name and region_name are only valid with "
+                "endpoint_name, region_name, and s3_staging_uri are only valid with "
                 "mode='sagemaker'"
             )
         if model is _MODEL_REQUIRED or model is None:
@@ -1237,10 +1311,7 @@ class SynthefyNoriClient:
         # or mode="auto") instead of silently running the base model. Checked against the *requested*
         # mode so the guard is deterministic (it does not depend on whether synthefy-nori happens to
         # be installed, which is what mode="auto" resolves on).
-        if (
-            _is_thinking_model(model)
-            and requested_mode not in ("remote", "sagemaker")
-        ):
+        if _is_thinking_model(model) and requested_mode not in ("remote", "sagemaker"):
             raise ValueError(
                 f"model={model!r} is a Nori Thinking (test-time-compute) variant, which runs only "
                 f"on the hosted Synthefy API. Set mode='remote' with a Baseten API key to use it "
@@ -1254,6 +1325,13 @@ class SynthefyNoriClient:
         self.endpoint = endpoint
         self.endpoint_name = endpoint_name
         self.region_name = region_name
+        self.s3_staging_uri = s3_staging_uri
+        self._s3_staging_bucket: Optional[str] = None
+        self._s3_staging_prefix: Optional[str] = None
+        if s3_staging_uri is not None:
+            self._s3_staging_bucket, self._s3_staging_prefix = _parse_s3_uri(
+                s3_staging_uri, require_prefix=True
+            )
         # self.model is the gateway model id sent in the remote body: a friendly name maps to its
         # slug, and a raw slug passes through. In local mode we additionally resolve -- and
         # validate -- the local checkpoint selector, which raises for a selector that has no local
@@ -1265,11 +1343,12 @@ class SynthefyNoriClient:
         self.user_agent = user_agent or f"synthefy-python httpx/{httpx.__version__}"
         self._aws_user_agent_extra = user_agent or "synthefy-python"
         self._aws_client: Optional[Any] = None
+        self._aws_s3_client: Optional[Any] = None
 
         if mode == "sagemaker":
             self.api_key = None
             self.client = None
-            self._aws_client = _create_sagemaker_runtime_client(
+            self._aws_client, self._aws_s3_client = _create_sagemaker_clients(
                 region_name=self.region_name,
                 timeout=self.timeout,
                 max_retries=self.max_retries,
@@ -1285,9 +1364,7 @@ class SynthefyNoriClient:
                     "environment variable when mode='remote'"
                 )
             self.api_key: Optional[str] = api_key
-            self.client: Optional[httpx.Client] = httpx.Client(
-                base_url=self.base_url
-            )
+            self.client: Optional[httpx.Client] = httpx.Client(base_url=self.base_url)
         else:  # local
             self.api_key = api_key  # unused in local mode; may be None
             self.client = None
@@ -1323,6 +1400,11 @@ class SynthefyNoriClient:
         if self._aws_client is not None:
             try:
                 self._aws_client.close()
+            except Exception:
+                pass
+        if self._aws_s3_client is not None:
+            try:
+                self._aws_s3_client.close()
             except Exception:
                 pass
 
@@ -1593,7 +1675,7 @@ class SynthefyNoriClient:
             )
         if self.mode == "sagemaker" and timeout is not None:
             warnings.warn(
-                "Per-prediction timeout is ignored for SageMaker; boto3 applies "
+                "Per-prediction timeout is ignored for SageMaker; asynchronous polling uses "
                 "the timeout configured on SynthefyNoriClient.",
                 UserWarning,
                 stacklevel=2,
@@ -1608,15 +1690,24 @@ class SynthefyNoriClient:
             # send the widened numeric matrix through the normal request path
             # (works identically for local / remote / AWS backends).
             X_train, X_test = _widen_text_columns(
-                X_train, X_test, list(text_columns), svd_dim, embedder,
-                max_categorical_cardinality, text_device,
+                X_train,
+                X_test,
+                list(text_columns),
+                svd_dim,
+                embedder,
+                max_categorical_cardinality,
+                text_device,
             )
         request = _build_nori_request(
-            X_train, y_train, X_test, task,
+            X_train,
+            y_train,
+            X_test,
+            task,
             max_categorical_cardinality=max_categorical_cardinality,
             categorical_encoding=categorical_encoding,
             output_type=output_type,
             quantile_levels=quantile_levels,
+            array_backed=self.mode == "sagemaker",
         )
         request.memory_policy = memory_policy
         # Cleared per call so a stale report from an earlier prediction can never be read
@@ -1651,8 +1742,12 @@ class SynthefyNoriClient:
                     y_train=y_train,
                 )
             return _shape_full(
-                q_by_row, taus, mean,
-                as_pandas=as_pandas, X_test=X_test, y_train=y_train,
+                q_by_row,
+                taus,
+                mean,
+                as_pandas=as_pandas,
+                X_test=X_test,
+                y_train=y_train,
             )
 
         if self.mode == "local":
@@ -1894,140 +1989,222 @@ class SynthefyNoriClient:
                 f"it {honored}. Such a deployment answers with the distribution "
                 f"mean, which is indistinguishable from a real {output_type!r} "
                 "result, so this is raised rather than returning means as if they "
-                'were what you asked for. Use local mode (pip install '
+                "were what you asked for. Use local mode (pip install "
                 '"synthefy[local]", then mode="local"), or point at a deployment '
                 "that serves distribution output."
             )
         return parsed
 
-    @staticmethod
-    def _raise_sagemaker_model_error(exc: Exception) -> None:
-        """Translate a SageMaker ModelError and re-raise every other SDK error."""
-        aws_response = getattr(exc, "response", None)
-        error = aws_response.get("Error", {}) if isinstance(aws_response, dict) else {}
-        if error.get("Code") != "ModelError":
-            raise exc
-        original_status = aws_response.get("OriginalStatusCode", 500)
+    def _s3_object_exists(self, location: str) -> bool:
+        if self._aws_s3_client is None:
+            raise RuntimeError("SageMaker S3 transport is not initialized")
+        bucket, key = _parse_s3_uri(location)
         try:
-            status = int(original_status)
-        except (TypeError, ValueError):
-            status = 500
-        if status < 400 or status > 599:
-            status = 500
-        message = (
-            aws_response.get("OriginalMessage")
-            or error.get("Message")
-            or "SageMaker endpoint returned a model error"
+            self._aws_s3_client.head_object(Bucket=bucket, Key=key)
+            return True
+        except Exception as exc:
+            if _is_missing_s3_object(exc):
+                return False
+            raise
+
+    def _download_s3_object(self, location: str, destination: Path) -> None:
+        if self._aws_s3_client is None:
+            raise RuntimeError("SageMaker S3 transport is not initialized")
+        bucket, key = _parse_s3_uri(location)
+        self._aws_s3_client.download_file(bucket, key, str(destination))
+
+    def _read_sagemaker_failure(
+        self, location: str, *, invocation_id: str
+    ) -> SageMakerInvocationError:
+        temporary = tempfile.NamedTemporaryFile(
+            prefix="nori-failure-", suffix=".json", delete=False
         )
-        details = {
-            "error": {
-                "message": message,
-                "code": "ModelError",
-                "log_stream_arn": aws_response.get("LogStreamArn"),
-            }
-        }
-        headers: Dict[str, str] = {}
-        metadata = aws_response.get("ResponseMetadata", {})
-        if metadata.get("RequestId"):
-            headers["x-request-id"] = metadata["RequestId"]
-        _raise_for_status(httpx.Response(status, json=details, headers=headers))
+        path = Path(temporary.name)
+        temporary.close()
+        try:
+            self._download_s3_object(location, path)
+            text = path.read_text(encoding="utf-8", errors="replace")[:16_384]
+        finally:
+            path.unlink(missing_ok=True)
+        message = text.strip() or "SageMaker asynchronous inference failed"
+        try:
+            details = json.loads(text)
+        except json.JSONDecodeError:
+            details = None
+        if isinstance(details, dict):
+            message = str(
+                details.get("ErrorMessage")
+                or details.get("FailureReason")
+                or details.get("failureReason")
+                or details.get("Message")
+                or details.get("message")
+                or details.get("error")
+                or message
+            )
+        return SageMakerInvocationError(
+            f"SageMaker invocation {invocation_id} failed: {message}",
+            invocation_id=invocation_id,
+            failure_location=location,
+        )
+
+    def _wait_for_sagemaker_result(
+        self,
+        *,
+        invocation_id: str,
+        output_location: str,
+        failure_location: Optional[str],
+    ) -> Dict[str, Any]:
+        deadline = time.monotonic() + self.timeout
+        delay = _SAGEMAKER_POLL_INITIAL_SECONDS
+        while True:
+            if failure_location and self._s3_object_exists(failure_location):
+                raise self._read_sagemaker_failure(
+                    failure_location, invocation_id=invocation_id
+                )
+            if self._s3_object_exists(output_location):
+                temporary = tempfile.NamedTemporaryFile(
+                    prefix="nori-output-", suffix=".json", delete=False
+                )
+                path = Path(temporary.name)
+                temporary.close()
+                try:
+                    self._download_s3_object(output_location, path)
+                    with path.open(encoding="utf-8") as handle:
+                        response_data = json.load(handle)
+                finally:
+                    path.unlink(missing_ok=True)
+                if not isinstance(response_data, dict):
+                    raise ValueError(
+                        "SageMaker endpoint returned JSON that was not an object"
+                    )
+                return response_data
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise APITimeoutError(
+                    "Timed out waiting for SageMaker invocation "
+                    f"{invocation_id}. This client timeout does not cancel a queued "
+                    "server-side invocation."
+                )
+            jittered = delay + random.uniform(0.0, delay * 0.25)
+            time.sleep(min(jittered, remaining))
+            delay = min(delay * 2, _SAGEMAKER_POLL_MAX_SECONDS)
 
     @staticmethod
-    def _read_sagemaker_stream(event_stream: Any) -> bytes:
-        """Collect SageMaker event-stream payload parts and close the stream.
-
-        This deliberately stays synchronous: the public ``predict`` API and
-        boto3's event-stream iterator are both synchronous. An async wrapper
-        here would still block while boto3 reads each event.
-        """
-        chunks: List[bytes] = []
+    def _owned_result_location(location: str, invocation_id: str) -> bool:
         try:
-            for event in event_stream:
-                if "PayloadPart" in event:
-                    chunks.append(event["PayloadPart"].get("Bytes", b""))
-                    continue
-                if "ModelStreamError" in event:
-                    details = event["ModelStreamError"]
-                    raise RuntimeError(
-                        "SageMaker model stream failed: "
-                        f"{details.get('ErrorCode', 'unknown')}: "
-                        f"{details.get('Message', 'no message')}"
-                    )
-                if "InternalStreamFailure" in event:
-                    raise RuntimeError(
-                        "SageMaker response stream failed internally: "
-                        f"{event['InternalStreamFailure'].get('Message', 'no message')}"
-                    )
-        finally:
-            close = getattr(event_stream, "close", None)
-            if close is not None:
-                close()
-        return b"".join(chunks)
+            _, key = _parse_s3_uri(location)
+        except ValueError:
+            return False
+        return f"/invocations/{invocation_id}/" in f"/{key}"
+
+    def _cleanup_sagemaker_objects(
+        self,
+        *,
+        invocation_id: str,
+        input_location: str,
+        output_location: Optional[str],
+        failure_location: Optional[str],
+    ) -> None:
+        if self._aws_s3_client is None:
+            return
+        locations = [input_location]
+        for location in (output_location, failure_location):
+            if location and self._owned_result_location(location, invocation_id):
+                locations.append(location)
+        for location in dict.fromkeys(locations):
+            bucket, key = _parse_s3_uri(location)
+            try:
+                self._aws_s3_client.delete_object(Bucket=bucket, Key=key)
+            except Exception as exc:
+                warnings.warn(
+                    f"Could not delete temporary SageMaker object {location}: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
     def _invoke_sagemaker_predict(
         self,
-        request: NoriPredictRequest,
+        request: Union[NoriPredictRequest, _NoriArrayRequest],
         *,
         output_type: str,
     ) -> NoriPredictResponse:
         """Invoke the configured SageMaker endpoint with a SigV4-signed request."""
-        if self._aws_client is None or self.endpoint_name is None:
+        if (
+            self._aws_client is None
+            or self._aws_s3_client is None
+            or self.endpoint_name is None
+            or self._s3_staging_bucket is None
+            or self._s3_staging_prefix is None
+        ):
             raise RuntimeError(
                 "SageMaker transport is not initialized; construct the client with "
                 "mode='sagemaker' and endpoint_name"
             )
         if self._sagemaker_model is None:
             raise RuntimeError("SageMaker transport has no resolved model identity")
-        payload = request.to_wire()
-        payload["model"] = self._sagemaker_model
-        body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode(
-            "utf-8"
+        invocation_id = uuid.uuid4().hex
+        input_key = (
+            f"{self._s3_staging_prefix}/{self.endpoint_name}/"
+            f"{invocation_id}/request.tensorfile"
         )
-        if len(body) > SAGEMAKER_MAX_BODY_BYTES:
-            raise ValueError(
-                "The SageMaker request body is "
-                f"{len(body):,} bytes, exceeding InvokeEndpointWithResponseStream's "
-                f"{SAGEMAKER_MAX_BODY_BYTES:,}-byte limit. Reduce the context/query rows."
-            )
+        input_location = f"s3://{self._s3_staging_bucket}/{input_key}"
+        output_location = None
+        failure_location = None
+        temporary = tempfile.NamedTemporaryFile(
+            prefix="nori-request-", suffix=".tensorfile", delete=False
+        )
+        request_path = Path(temporary.name)
+        temporary.close()
         try:
-            # All AWS variants stream. Even base 30M can exceed SageMaker's 60-second regular
-            # response ceiling for large tables; heartbeat payload parts keep the connection
-            # active while the public predict() API continues to return one final typed value.
-            response = self._aws_client.invoke_endpoint_with_response_stream(
-                EndpointName=self.endpoint_name,
-                ContentType="application/json",
-                Accept="application/json",
-                CustomAttributes="synthefy-response-stream=v1",
-                Body=body,
-            )
-        except Exception as exc:
-            # Credential, region, signing, and throttling exceptions stay as botocore errors.
-            self._raise_sagemaker_model_error(exc)
-            raise RuntimeError("unreachable")  # pragma: no cover
-
-        response_body = response["Body"]
-        raw = self._read_sagemaker_stream(response_body)
-        response_data = json.loads(raw)
-        if not isinstance(response_data, dict):
-            raise ValueError(
-                "SageMaker endpoint returned JSON that was not an object"
-            )
-        stream_error = response_data.get("error")
-        if isinstance(stream_error, dict) and "status_code" in stream_error:
-            status = int(stream_error.get("status_code", 500))
-            if status < 400 or status > 599:
-                status = 500
-            _raise_for_status(
-                httpx.Response(
-                    status,
-                    json={
-                        "error": {
-                            "message": stream_error.get(
-                                "message", "SageMaker streaming inference failed"
-                            )
-                        }
-                    },
+            save_nori_request(request_path, request, model=self._sagemaker_model)
+            request_size = request_path.stat().st_size
+            if request_size > SAGEMAKER_MAX_INPUT_BYTES:
+                raise ValueError(
+                    "The serialized SageMaker request exceeds the 1 GB asynchronous "
+                    "inference payload limit. Reduce the context/query rows."
                 )
+            self._aws_s3_client.upload_file(
+                str(request_path), self._s3_staging_bucket, input_key
+            )
+            response = self._aws_client.invoke_endpoint_async(
+                EndpointName=self.endpoint_name,
+                InputLocation=input_location,
+                ContentType=NORI_BINARY_CONTENT_TYPE,
+                Accept="application/json",
+                InferenceId=invocation_id,
+                RequestTTLSeconds=_SAGEMAKER_REQUEST_TTL_SECONDS,
+                InvocationTimeoutSeconds=_SAGEMAKER_INVOCATION_TIMEOUT_SECONDS,
+                S3OutputPathExtension=f"invocations/{invocation_id}",
+                Filename="result.json",
+            )
+            output_location = response.get("OutputLocation")
+            failure_location = response.get("FailureLocation")
+            if not isinstance(output_location, str) or not output_location:
+                raise RuntimeError("InvokeEndpointAsync returned no S3 OutputLocation")
+            for name, location in (
+                ("OutputLocation", output_location),
+                ("FailureLocation", failure_location),
+            ):
+                if location and not self._owned_result_location(
+                    location, invocation_id
+                ):
+                    raise RuntimeError(
+                        f"InvokeEndpointAsync returned {name} outside this invocation's "
+                        "isolated output prefix"
+                    )
+            response_data = self._wait_for_sagemaker_result(
+                invocation_id=invocation_id,
+                output_location=output_location,
+                failure_location=failure_location,
+            )
+        finally:
+            request_path.unlink(missing_ok=True)
+            self._cleanup_sagemaker_objects(
+                invocation_id=invocation_id,
+                input_location=input_location,
+                output_location=output_location,
+                failure_location=failure_location,
             )
         actual_model = response_data.get("model")
         if actual_model != self._sagemaker_model:
@@ -2211,9 +2388,9 @@ class SynthefyNoriClient:
         self, attempt: int, response: Optional[httpx.Response]
     ) -> float:
         if response is not None:
-            retry_after = response.headers.get(
-                "retry-after"
-            ) or response.headers.get("Retry-After")
+            retry_after = response.headers.get("retry-after") or response.headers.get(
+                "Retry-After"
+            )
             if retry_after is not None:
                 try:
                     return float(retry_after)
@@ -2258,9 +2435,7 @@ class SynthefyNoriClient:
                 last_exc = APIConnectionError(str(exc))
 
             # Decide to retry
-            if attempt < attempts - 1 and self._should_retry(
-                response, last_exc
-            ):
+            if attempt < attempts - 1 and self._should_retry(response, last_exc):
                 delay = self._compute_backoff(attempt, response)
                 time.sleep(delay)
                 continue

@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.4.0]
+
+### Changed
+
+- Replaced SageMaker response streaming with one S3-backed asynchronous transport for every
+  request. `predict()` remains blocking while it uploads, submits `InvokeEndpointAsync`, polls,
+  deserializes, and cleans up its invocation objects.
+- Added the required `s3_staging_uri="s3://customer-bucket/prefix"` SageMaker constructor
+  setting. The client never creates a bucket and continues to use boto3's credential chain.
+- Added a compact memory-mapped tensor-file request format so SageMaker inputs avoid nested JSON-list copies.
+  AWS accepts asynchronous inputs up to 1 GB; practical table size remains model- and
+  instance-memory-dependent.
+- Kept `nori-6m`, `nori-30m`, and `nori-30m-thinking-medium` as peers selected through the same
+  application and endpoint.
+
 ## [6.3.0]
 
 ### Added

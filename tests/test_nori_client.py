@@ -23,15 +23,18 @@ from synthefy import (
     SynthefyNoriClient,
 )
 from synthefy.api_client import (
+    APITimeoutError,
     AuthenticationError,
     BadRequestError,
     InternalServerError,
+    SageMakerInvocationError,
 )
 from synthefy.data_models import NoriPredictRequest, NoriPredictResponse
 from synthefy.nori_client import (
     GATEWAY_ENDPOINT,
     NORI_VARIANTS,
-    SAGEMAKER_MAX_BODY_BYTES,
+    SAGEMAKER_MAX_INPUT_BYTES,
+    _build_nori_request,
     _is_thinking_model,
     _nullable_matrix,
     _resolve_remote_levels,
@@ -51,6 +54,23 @@ def test_nori_models_are_canonical_data_models_with_compatible_exports():
 
     assert PublicRequest is ClientRequest is NoriPredictRequest
     assert PublicResponse is ClientResponse is NoriPredictResponse
+
+
+def test_request_model_exposes_exactly_the_three_peer_model_names():
+    schema = NoriPredictRequest.model_json_schema()
+    model_schema = schema["properties"]["model"]["anyOf"][0]
+    assert set(model_schema["enum"]) == {
+        "nori-6m",
+        "nori-30m",
+        "nori-30m-thinking-medium",
+    }
+    with pytest.raises(ValueError):
+        NoriPredictRequest(
+            model="primary-model",
+            X_train=[[0.0]],
+            y_train=[0.0],
+            X_test=[[1.0]],
+        )
 
 
 def _attach_mock(client: SynthefyNoriClient, handler: Handler) -> None:
@@ -89,11 +109,12 @@ def test_aws_factory_uses_argument_free_boto3_session(monkeypatch):
         def __init__(self, **kwargs):
             capture["config"] = kwargs
 
-    class FakeRuntime:
-        def close(self):
-            capture["closed"] = True
+    class FakeClient:
+        def __init__(self, name):
+            self.name = name
 
-    runtime = FakeRuntime()
+        def close(self):
+            capture.setdefault("closed", []).append(self.name)
 
     class FakeSession:
         def __init__(self, *args, **kwargs):
@@ -101,9 +122,8 @@ def test_aws_factory_uses_argument_free_boto3_session(monkeypatch):
             capture["session_kwargs"] = kwargs
 
         def client(self, service_name, **kwargs):
-            capture["service_name"] = service_name
-            capture["client_kwargs"] = kwargs
-            return runtime
+            capture.setdefault("clients", []).append((service_name, kwargs))
+            return FakeClient(service_name)
 
     class FakeBoto3:
         Session = FakeSession
@@ -115,22 +135,23 @@ def test_aws_factory_uses_argument_free_boto3_session(monkeypatch):
         model="nori-30m",
         endpoint_name="nori-dev-123",
         region_name="us-east-1",
+        s3_staging_uri="s3://customer-bucket/nori/staging/",
         timeout=75.0,
         max_retries=3,
     )
 
     assert capture["session_args"] == ()
     assert capture["session_kwargs"] == {}
-    assert capture["service_name"] == "sagemaker-runtime"
-    assert capture["client_kwargs"]["region_name"] == "us-east-1"
+    assert [name for name, _ in capture["clients"]] == ["sagemaker-runtime", "s3"]
+    assert all(kwargs["region_name"] == "us-east-1" for _, kwargs in capture["clients"])
     assert capture["config"]["read_timeout"] == 75.0
     assert capture["config"]["retries"]["total_max_attempts"] == 4
     client.close()
-    assert capture["closed"] is True
+    assert capture["closed"] == ["sagemaker-runtime", "s3"]
 
 
-def test_botocore_stubber_accepts_the_streaming_request_shape():
-    """Keep the exact operation and signed parameter names checked by botocore."""
+def test_botocore_stubber_accepts_the_async_request_shape():
+    """Keep the exact async operation and signed parameter names checked by botocore."""
     import boto3
     from botocore.stub import Stubber
 
@@ -142,285 +163,283 @@ def test_botocore_stubber_accepts_the_streaming_request_shape():
     )
     request = {
         "EndpointName": "nori-dev-123",
-        "ContentType": "application/json",
+        "InputLocation": "s3://customer-bucket/nori/staging/request.tensorfile",
+        "ContentType": "application/vnd.synthefy.nori.tensorfile",
         "Accept": "application/json",
-        "CustomAttributes": "synthefy-response-stream=v1",
-        "Body": b'{}',
+        "InferenceId": "invocation-123",
+        "RequestTTLSeconds": 21_600,
+        "InvocationTimeoutSeconds": 3_600,
+        "S3OutputPathExtension": "invocations/invocation-123",
+        "Filename": "result.json",
     }
     stubber = Stubber(runtime)
     stubber.add_response(
-        "invoke_endpoint_with_response_stream",
-        {"Body": {"PayloadPart": {"Bytes": b'{}'}}},
+        "invoke_endpoint_async",
+        {
+            "InferenceId": "invocation-123",
+            "OutputLocation": (
+                "s3://customer-bucket/nori/output/invocations/"
+                "invocation-123/result.json.out"
+            ),
+            "FailureLocation": (
+                "s3://customer-bucket/nori/failure/invocations/"
+                "invocation-123/result.json.out"
+            ),
+        },
         request,
     )
 
     with stubber:
-        response = runtime.invoke_endpoint_with_response_stream(**request)
-        assert response["Body"]["PayloadPart"]["Bytes"] == b'{}'
+        response = runtime.invoke_endpoint_async(**request)
+        assert response["InferenceId"] == "invocation-123"
         stubber.assert_no_pending_responses()
 
 
-def test_aws_predict_streams_named_endpoint_with_canonical_body(monkeypatch):
-    from synthefy import nori_client as module
-
-    capture: Dict = {}
-    response_body = json.dumps(
-        {
-            "task": "regression",
-            "model": "nori-30m",
-            "predictions": [10.0, 20.0],
-        }
-    ).encode("utf-8")
-    request_body = json.dumps(
-        {
-            "X_train": [[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
-            "y_train": [1.0, 1.0, 2.0],
-            "X_test": [[2.0, 2.0], [3.0, 3.0]],
-            "task": "regression",
-            "model": "nori-30m",
-        },
-        separators=(",", ":"),
-    ).encode("utf-8")
-    class FakeEventStream:
-        def __iter__(self):
-            yield {"PayloadPart": {"Bytes": b" \n"}}
-            yield {"PayloadPart": {"Bytes": response_body}}
-
-        def close(self):
-            capture["closed"] = True
-
-    class FakeRuntime:
-        def invoke_endpoint_with_response_stream(self, **kwargs):
-            capture["request"] = kwargs
-            return {"Body": FakeEventStream()}
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(
-        module, "_create_sagemaker_runtime_client", lambda **_kwargs: FakeRuntime()
-    )
-
-    client = SynthefyNoriClient(
-        mode="sagemaker",
-        model="nori-30m",
-        endpoint_name="nori-dev-123",
-        region_name="us-east-1",
-    )
-    predictions = client.predict(
-        X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
-        y_train=[1.0, 1.0, 2.0],
-        X_test=[[2.0, 2.0], [3.0, 3.0]],
-    )
-
-    assert predictions == [10.0, 20.0]
-    assert capture["request"] == {
-        "EndpointName": "nori-dev-123",
-        "ContentType": "application/json",
-        "Accept": "application/json",
-        "CustomAttributes": "synthefy-response-stream=v1",
-        "Body": request_body,
-    }
-    assert capture["closed"] is True
+class _MissingObject(Exception):
+    response = {"Error": {"Code": "404"}}
 
 
-def test_sagemaker_thinking_medium_uses_response_stream_and_checks_model(monkeypatch):
-    from synthefy import nori_client as module
+class _FakeS3:
+    def __init__(self):
+        self.objects = {}
+        self.uploads = []
+        self.deletes = []
+        self.fail_upload = None
+        self.fail_download = None
 
-    capture: Dict = {}
+    def upload_file(self, filename, bucket, key):
+        if self.fail_upload:
+            raise self.fail_upload
+        import struct
 
-    class FakeEventStream:
-        def __iter__(self):
-            yield {"PayloadPart": {"Bytes": b" \n"}}
-            yield {
-                "PayloadPart": {
-                    "Bytes": json.dumps(
-                        {
-                            "task": "regression",
-                            "model": "nori-30m-thinking-medium",
-                            "predictions": [3.0],
-                        }
-                    ).encode()
-                }
-            }
-
-        def close(self):
-            capture["closed"] = True
-
-    class FakeRuntime:
-        def invoke_endpoint_with_response_stream(self, **kwargs):
-            capture["request"] = kwargs
-            return {"Body": FakeEventStream()}
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(
-        module,
-        "_create_sagemaker_runtime_client",
-        lambda **_kwargs: FakeRuntime(),
-    )
-    client = SynthefyNoriClient(
-        mode="sagemaker",
-        model="nori-30m-thinking-medium",
-        endpoint_name="nori-thinking-medium-prod",
-    )
-
-    predictions = client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
-
-    assert predictions == [3.0]
-    assert capture["request"]["EndpointName"] == "nori-thinking-medium-prod"
-    assert capture["request"]["CustomAttributes"] == "synthefy-response-stream=v1"
-    assert json.loads(capture["request"]["Body"])["model"] == "nori-30m-thinking-medium"
-    assert capture["closed"] is True
-
-
-def test_sagemaker_response_model_mismatch_fails_closed(monkeypatch):
-    from synthefy import nori_client as module
-
-    class FakeRuntime:
-        def invoke_endpoint_with_response_stream(self, **_kwargs):
-            return {
-                "Body": [
-                    {
-                        "PayloadPart": {
-                            "Bytes": json.dumps(
-                                {
-                                    "task": "regression",
-                                    "model": "nori-6m",
-                                    "predictions": [2.0],
-                                }
-                            ).encode()
-                        }
-                    }
-                ]
-            }
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(
-        module,
-        "_create_sagemaker_runtime_client",
-        lambda **_kwargs: FakeRuntime(),
-    )
-    client = SynthefyNoriClient(
-        mode="sagemaker",
-        model="nori-30m",
-        endpoint_name="wrong-model-endpoint",
-    )
-
-    with pytest.raises(ValueError, match="model identity mismatch"):
-        client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
-
-
-def test_aws_model_error_preserves_original_container_status(monkeypatch):
-    from botocore.exceptions import ClientError
-    from synthefy import nori_client as module
-
-    class FailingRuntime:
-        def invoke_endpoint_with_response_stream(self, **_kwargs):
-            raise ClientError(
-                {
-                    "Error": {"Code": "ModelError", "Message": "wrapped"},
-                    "OriginalStatusCode": 400,
-                    "OriginalMessage": "invalid Nori request",
-                    "LogStreamArn": "arn:aws:logs:us-east-1:123:log-stream/test",
-                    "ResponseMetadata": {"RequestId": "aws-request-123"},
+        with Path(filename).open("rb") as request:
+            magic, header_size = struct.unpack("<8sI", request.read(12))
+            assert magic == b"NORI_REQ"
+            header = json.loads(request.read(header_size))
+        self.uploads.append(
+            {
+                "bucket": bucket,
+                "key": key,
+                "metadata": header["metadata"],
+                "dtypes": {
+                    name: descriptor["dtype"]
+                    for name, descriptor in header["tensors"].items()
                 },
-                "InvokeEndpoint",
-            )
+                "shapes": {
+                    name: descriptor["shape"]
+                    for name, descriptor in header["tensors"].items()
+                },
+            }
+        )
+        self.objects[(bucket, key)] = Path(filename).read_bytes()
 
-        def close(self):
-            pass
+    def head_object(self, *, Bucket, Key):
+        if (Bucket, Key) not in self.objects:
+            raise _MissingObject()
+        return {"ContentLength": len(self.objects[(Bucket, Key)])}
 
+    def download_file(self, bucket, key, filename):
+        if self.fail_download:
+            raise self.fail_download
+        Path(filename).write_bytes(self.objects[(bucket, key)])
+
+    def delete_object(self, *, Bucket, Key):
+        self.deletes.append((Bucket, Key))
+        self.objects.pop((Bucket, Key), None)
+
+    def close(self):
+        pass
+
+
+class _FakeRuntime:
+    def __init__(self, s3, *, result="success"):
+        self.s3 = s3
+        self.result = result
+        self.requests = []
+        self.failure = None
+
+    def invoke_endpoint_async(self, **request):
+        if self.failure:
+            raise self.failure
+        self.requests.append(request)
+        invocation_id = request["InferenceId"]
+        output = f"s3://results/output/invocations/{invocation_id}/result.json.out"
+        failure = f"s3://results/failure/invocations/{invocation_id}/result.json.out"
+        if self.result == "success":
+            model = self.s3.uploads[-1]["metadata"]["model"]
+            self.s3.objects[("results", output.split("results/", 1)[1])] = json.dumps(
+                {"task": "regression", "model": model, "predictions": [10.0, 20.0]}
+            ).encode()
+        elif self.result == "failure":
+            self.s3.objects[("results", failure.split("results/", 1)[1])] = json.dumps(
+                {"ErrorMessage": "container rejected the table"}
+            ).encode()
+        return {
+            "InferenceId": invocation_id,
+            "OutputLocation": output,
+            "FailureLocation": failure,
+        }
+
+    def invoke_endpoint_with_response_stream(self, **_request):
+        raise AssertionError("the removed response-stream operation was called")
+
+    def close(self):
+        pass
+
+
+def _stubbed_aws_client(monkeypatch, *, model="nori-30m", result="success", timeout=5):
+    from synthefy import nori_client as module
+
+    s3 = _FakeS3()
+    runtime = _FakeRuntime(s3, result=result)
     monkeypatch.setattr(
-        module,
-        "_create_sagemaker_runtime_client",
-        lambda **_kwargs: FailingRuntime(),
+        module, "_create_sagemaker_clients", lambda **_kwargs: (runtime, s3)
     )
     client = SynthefyNoriClient(
         mode="sagemaker",
-        model="nori-30m",
-        endpoint_name="nori-dev-123",
+        model=model,
+        endpoint_name="nori-shared",
+        region_name="us-east-1",
+        s3_staging_uri="s3://customer-bucket/nori/staging/",
+        timeout=timeout,
     )
+    return client, runtime, s3
 
-    with pytest.raises(BadRequestError) as caught:
+
+@pytest.mark.parametrize("model", ["nori-6m", "nori-30m", "nori-30m-thinking-medium"])
+def test_aws_predict_uses_s3_and_invoke_endpoint_async_for_every_model(
+    monkeypatch, model
+):
+    """All three peers use one binary S3 path; no model can fall back to streaming."""
+    client, runtime, s3 = _stubbed_aws_client(monkeypatch, model=model)
+    predictions = client.predict(
+        [[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
+        [1.0, 1.0, 2.0],
+        [[2.0, 2.0], [3.0, 3.0]],
+    )
+    assert predictions == [10.0, 20.0]
+    upload = s3.uploads[0]
+    assert upload["bucket"] == "customer-bucket"
+    assert upload["key"].startswith("nori/staging/nori-shared/")
+    assert upload["metadata"]["model"] == model
+    assert upload["shapes"] == {"X_test": [2, 2], "X_train": [3, 2], "y_train": [3]}
+    assert upload["dtypes"] == {"X_test": "<f4", "X_train": "<f4", "y_train": "<f8"}
+    request = runtime.requests[0]
+    assert request["EndpointName"] == "nori-shared"
+    assert request["InputLocation"] == f"s3://customer-bucket/{upload['key']}"
+    assert request["ContentType"] == "application/vnd.synthefy.nori.tensorfile"
+    assert request["RequestTTLSeconds"] == 21_600
+    assert request["InvocationTimeoutSeconds"] == 3_600
+    assert "Body" not in request and "CustomAttributes" not in request
+    deleted_keys = {key for _, key in s3.deletes}
+    assert upload["key"] in deleted_keys
+    assert any(f"invocations/{request['InferenceId']}" in key for key in deleted_keys)
+
+
+def test_sagemaker_array_request_keeps_compact_feature_arrays_without_a_copy():
+    """A contiguous float32 table must not gain a payload-sized float64 twin."""
+    X_train = np.arange(24, dtype=np.float32).reshape(6, 4)
+    X_test = np.arange(8, dtype=np.float32).reshape(2, 4)
+    y_train = np.arange(6, dtype=np.float64)
+    request = _build_nori_request(
+        X_train,
+        y_train,
+        X_test,
+        array_backed=True,
+    )
+    assert np.shares_memory(request.X_train, X_train)
+    assert np.shares_memory(request.X_test, X_test)
+    assert np.shares_memory(request.y_train, y_train)
+
+
+def test_sagemaker_invocation_ids_are_unique(monkeypatch):
+    client, runtime, _ = _stubbed_aws_client(monkeypatch, model="nori-6m")
+    for _ in range(2):
         client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
-
-    assert str(caught.value) == "invalid Nori request"
-    assert caught.value.status_code == 400
-    assert caught.value.request_id == "aws-request-123"
-    assert caught.value.response_body["error"]["log_stream_arn"].endswith(
-        "log-stream/test"
-    )
+    assert len({request["InferenceId"] for request in runtime.requests}) == 2
 
 
-def test_aws_constructor_and_predict_reject_transport_mismatches(monkeypatch):
+def test_sagemaker_failure_object_is_a_useful_client_exception(monkeypatch):
+    client, runtime, s3 = _stubbed_aws_client(monkeypatch, result="failure")
+    with pytest.raises(SageMakerInvocationError, match="container rejected") as caught:
+        client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
+    assert caught.value.invocation_id == runtime.requests[0]["InferenceId"]
+    assert not s3.objects
+
+
+def test_sagemaker_timeout_cleans_up_only_its_invocation(monkeypatch):
     from synthefy import nori_client as module
 
-    class FakeRuntime:
-        def invoke_endpoint_with_response_stream(self, **_kwargs):
-            return {
-                "Body": [
-                    {
-                        "PayloadPart": {
-                            "Bytes": json.dumps(
-                                {
-                                    "task": "regression",
-                                    "model": "nori-30m",
-                                    "predictions": [2.0],
-                                }
-                            ).encode()
-                        }
-                    }
-                ]
-            }
+    client, runtime, s3 = _stubbed_aws_client(monkeypatch, result="pending", timeout=1)
+    unrelated = ("customer-bucket", "nori/staging/someone-else/request.tensorfile")
+    s3.objects[unrelated] = b"keep"
+    clock = iter((0.0, 2.0))
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(clock))
+    with pytest.raises(APITimeoutError, match="does not cancel"):
+        client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
+    assert unrelated in s3.objects
+    assert unrelated not in s3.deletes
+    assert runtime.requests
 
-        def close(self):
-            pass
+
+@pytest.mark.parametrize("failure_at", ["upload", "invoke", "download"])
+def test_sagemaker_failures_still_cleanup_the_staged_input(monkeypatch, failure_at):
+    client, runtime, s3 = _stubbed_aws_client(monkeypatch)
+    if failure_at == "upload":
+        s3.fail_upload = RuntimeError("upload failed")
+    elif failure_at == "invoke":
+        runtime.failure = RuntimeError("invoke failed")
+    else:
+        s3.fail_download = RuntimeError("download failed")
+    with pytest.raises(RuntimeError, match=f"{failure_at} failed"):
+        client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
+    assert any(key.endswith("request.tensorfile") for _, key in s3.deletes)
+
+
+def test_sagemaker_never_deletes_an_unrelated_returned_location(monkeypatch):
+    client, runtime, s3 = _stubbed_aws_client(monkeypatch)
+
+    def unrelated_output(**request):
+        runtime.requests.append(request)
+        return {"OutputLocation": "s3://results/unrelated/result.json"}
+
+    runtime.invoke_endpoint_async = unrelated_output
+    s3.objects[("results", "unrelated/result.json")] = b"keep"
+    with pytest.raises(RuntimeError, match="outside this invocation"):
+        client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
+    assert ("results", "unrelated/result.json") in s3.objects
+    assert ("results", "unrelated/result.json") not in s3.deletes
+
+
+def test_sagemaker_rejects_over_one_gb_without_allocating_it(monkeypatch):
+    from synthefy import nori_client as module
+
+    client, _, s3 = _stubbed_aws_client(monkeypatch)
+    monkeypatch.setattr(
+        module.Path,
+        "stat",
+        lambda _path: types.SimpleNamespace(st_size=SAGEMAKER_MAX_INPUT_BYTES + 1),
+    )
+    with pytest.raises(ValueError, match="1 GB"):
+        client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
+    assert not s3.uploads
+
+
+def test_aws_constructor_requires_a_scoped_customer_staging_prefix(monkeypatch):
+    from synthefy import nori_client as module
 
     monkeypatch.setattr(
-        module,
-        "_create_sagemaker_runtime_client",
-        lambda **_kwargs: FakeRuntime(),
+        module, "_create_sagemaker_clients", lambda **_kwargs: (object(), object())
     )
-
-    with pytest.raises(ValueError, match="model is required"):
-        SynthefyNoriClient(mode="sagemaker", endpoint_name="nori-dev")
-    with pytest.raises(ValueError, match="endpoint_name is required"):
-        SynthefyNoriClient(mode="sagemaker", model="nori-30m")
-    with pytest.raises(ValueError, match="published Nori inference specification"):
-        SynthefyNoriClient(
-            mode="sagemaker", endpoint_name="nori-dev", model="custom"
-        )
-    with pytest.raises(ValueError, match="api_key is not used"):
+    with pytest.raises(ValueError, match="s3_staging_uri is required"):
+        SynthefyNoriClient(mode="sagemaker", endpoint_name="nori-dev", model="nori-30m")
+    with pytest.raises(ValueError, match="include a customer-owned prefix"):
         SynthefyNoriClient(
             mode="sagemaker",
             endpoint_name="nori-dev",
             model="nori-30m",
-            api_key="secret",
+            s3_staging_uri="s3://customer-bucket",
         )
-
-    client = SynthefyNoriClient(
-        mode="sagemaker", endpoint_name="nori-dev", model="nori-30m"
-    )
-    with pytest.raises(ValueError, match="extra_headers"):
-        client.predict(
-            [[0.0], [1.0]], [0.0, 1.0], [[2.0]], extra_headers={"x-test": "no"}
-        )
-    with pytest.warns(UserWarning, match="Per-prediction timeout is ignored"):
-        client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]], timeout=60)
-
-    monkeypatch.setattr(module, "SAGEMAKER_MAX_BODY_BYTES", 1)
-    with pytest.raises(ValueError, match="exceeding InvokeEndpoint"):
-        client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
-
-
-def test_sagemaker_body_limit_matches_marketplace_runtime():
-    # AWS Marketplace documents 25 MB as non-adjustable; a live runtime probe pins the decimal
-    # byte boundary (25,000,000 is accepted, 25,000,001 returns HTTP 413).
-    assert SAGEMAKER_MAX_BODY_BYTES == 25_000_000
 
 
 # --------------------------------------------------------------------------- #
@@ -620,7 +639,9 @@ def test_invalid_categorical_encoding_raises():
     df = pd.DataFrame({"cat": ["x", "y"]})
     with pytest.raises(ValueError, match="categorical_encoding"):
         client.predict(
-            X_train=df, y_train=[1.0, 2.0], X_test=df,
+            X_train=df,
+            y_train=[1.0, 2.0],
+            X_test=df,
             categorical_encoding="hashing",
         )
 
@@ -758,8 +779,10 @@ def test_numeric_category_dtype_is_treated_as_numeric_not_one_hot():
         warnings.simplefilter("error")  # must NOT warn / drop / explode
         client.predict(
             X_train=pd.DataFrame(
-                {"a": [0.0, 1.0, 2.0],
-                 "r": pd.Categorical([1, 2, 3], categories=[1, 2, 3])}
+                {
+                    "a": [0.0, 1.0, 2.0],
+                    "r": pd.Categorical([1, 2, 3], categories=[1, 2, 3]),
+                }
             ),
             y_train=[1.0, 2.0, 3.0],
             X_test=pd.DataFrame(
@@ -825,9 +848,7 @@ def test_integer_category_with_nan_does_not_crash():
     _attach_mock(client, _ok_handler([1.0], capture))
 
     client.predict(
-        X_train=pd.DataFrame(
-            {"r": pd.Categorical([1, 2, None], categories=[1, 2, 3])}
-        ),
+        X_train=pd.DataFrame({"r": pd.Categorical([1, 2, None], categories=[1, 2, 3])}),
         y_train=[1.0, 2.0, 3.0],
         X_test=pd.DataFrame({"r": pd.Categorical([2], categories=[1, 2, 3])}),
     )
@@ -849,8 +870,9 @@ def test_one_hot_name_value_collision_raises_clearly():
     Xtr = pd.DataFrame({"a": ["b_x", "b_x"], "a_b": ["x", "y"]})
     Xte = pd.DataFrame({"a": ["b_x"], "a_b": ["x"]})
     with pytest.raises(ValueError, match="duplicate column names"):
-        client.predict(X_train=Xtr, y_train=[1.0, 2.0], X_test=Xte,
-                       categorical_encoding="onehot")
+        client.predict(
+            X_train=Xtr, y_train=[1.0, 2.0], X_test=Xte, categorical_encoding="onehot"
+        )
 
 
 def test_period_column_raises_unsupported():
@@ -1026,9 +1048,7 @@ def test_custom_http_endpoint_still_requires_and_sends_model():
     )
     _attach_mock(client, _ok_handler([1.0], capture))
 
-    preds = client.predict(
-        X_train=[[0.0], [1.0]], y_train=[0.0, 1.0], X_test=[[2.0]]
-    )
+    preds = client.predict(X_train=[[0.0], [1.0]], y_train=[0.0, 1.0], X_test=[[2.0]])
 
     assert preds == [1.0]
     assert capture["path"] == "/predict"
@@ -1045,7 +1065,9 @@ def test_no_dedicated_url_constants_are_exported():
     import synthefy.nori_client as nc
 
     for name in ("DEDICATED_BASE_URL", "DEDICATED_ENDPOINT"):
-        assert not hasattr(nc, name), f"{name} must not exist; address Nori by gateway slug"
+        assert not hasattr(nc, name), (
+            f"{name} must not exist; address Nori by gateway slug"
+        )
     # The gateway host is `inference.baseten.co`; a per-model host is `model-<id>.api.baseten.co`,
     # so any `api.baseten.co` occurrence means an id-addressed host came back.
     source = Path(nc.__file__).read_text()
@@ -1076,7 +1098,9 @@ def test_baseten_env_is_not_read(monkeypatch):
 
 def test_explicit_api_key_wins_over_env(monkeypatch):
     monkeypatch.setenv("SYNTHEFY_NORI_API_KEY", "from-env")
-    assert SynthefyNoriClient(api_key="explicit", model="nori-30m").api_key == "explicit"
+    assert (
+        SynthefyNoriClient(api_key="explicit", model="nori-30m").api_key == "explicit"
+    )
 
 
 def test_missing_api_key_raises_in_remote_mode(monkeypatch):
@@ -1104,7 +1128,9 @@ def test_default_auth_scheme_is_bearer():
 
 def test_auth_scheme_override_sets_authorization_header():
     capture: Dict = {}
-    client = SynthefyNoriClient(api_key="test-key", auth_scheme="Api-Key", model="nori-30m")
+    client = SynthefyNoriClient(
+        api_key="test-key", auth_scheme="Api-Key", model="nori-30m"
+    )
     _attach_mock(client, _ok_handler([1.0], capture))
 
     client.predict(X_train=[[1.0]], y_train=[1.0], X_test=[[2.0]])
@@ -1119,18 +1145,16 @@ def test_invalid_auth_scheme_raises():
 
 def test_auto_mode_falls_back_to_remote_when_package_absent(monkeypatch):
     # synthefy-nori is not installed in the test environment, so auto -> remote.
-    monkeypatch.setattr(
-        "synthefy.nori_client._local_available", lambda: False
-    )
+    monkeypatch.setattr("synthefy.nori_client._local_available", lambda: False)
     client = SynthefyNoriClient(api_key="test-key", mode="auto", model="nori-30m")
     assert client.mode == "remote"
 
 
 def test_auto_mode_uses_local_when_package_present(monkeypatch):
-    monkeypatch.setattr(
-        "synthefy.nori_client._local_available", lambda: True
-    )
-    client = SynthefyNoriClient(mode="auto", model="nori-30m")  # no key needed once local
+    monkeypatch.setattr("synthefy.nori_client._local_available", lambda: True)
+    client = SynthefyNoriClient(
+        mode="auto", model="nori-30m"
+    )  # no key needed once local
     assert client.mode == "local"
 
 
@@ -1159,9 +1183,7 @@ def test_mismatched_train_rows_raises(client):
 
 def test_feature_count_mismatch_raises(client):
     with pytest.raises(ValueError, match="features"):
-        client.predict(
-            X_train=[[1.0, 2.0]], y_train=[1.0], X_test=[[3.0, 4.0, 5.0]]
-        )
+        client.predict(X_train=[[1.0, 2.0]], y_train=[1.0], X_test=[[3.0, 4.0, 5.0]])
 
 
 def test_non_2d_x_train_raises(client):
@@ -1172,9 +1194,7 @@ def test_non_2d_x_train_raises(client):
 def test_empty_x_train_raises(client):
     # A 2D array with zero rows reaches the row-count guard.
     with pytest.raises(ValueError, match="at least one context row"):
-        client.predict(
-            X_train=np.empty((0, 2)), y_train=[], X_test=[[3.0, 4.0]]
-        )
+        client.predict(X_train=np.empty((0, 2)), y_train=[], X_test=[[3.0, 4.0]])
 
 
 def test_flat_empty_x_train_raises_dimensionality(client):
@@ -1230,9 +1250,7 @@ def test_retries_on_server_error_then_succeeds(monkeypatch):
         calls["n"] += 1
         if calls["n"] == 1:
             return httpx.Response(503, json={"error": "temporarily down"})
-        return httpx.Response(
-            200, json={"task": "regression", "predictions": [7.0]}
-        )
+        return httpx.Response(200, json={"task": "regression", "predictions": [7.0]})
 
     client = SynthefyNoriClient(api_key="test-key", max_retries=2, model="nori-30m")
     _attach_mock(client, handler)
@@ -1283,10 +1301,11 @@ def test_final_error_wins_over_stale_earlier_attempt(monkeypatch):
 
 
 def test_request_model_roundtrip():
-    req = NoriPredictRequest(
-        X_train=[[1.0, 2.0]], y_train=[3.0], X_test=[[4.0, 5.0]]
-    )
+    req = NoriPredictRequest(X_train=[[1.0, 2.0]], y_train=[3.0], X_test=[[4.0, 5.0]])
     assert req.model_dump() == {
+        # Transport-owned model selection is optional on the reusable request model and
+        # validated to the three canonical peer names when supplied.
+        "model": None,
         "X_train": [[1.0, 2.0]],
         "y_train": [3.0],
         "X_test": [[4.0, 5.0]],
@@ -1304,9 +1323,7 @@ def test_request_model_omits_unset_distribution_fields_on_the_wire():
     # The canonical wire serializer must stay
     # exactly what earlier client versions sent, so adding these fields cannot
     # change any existing request.
-    req = NoriPredictRequest(
-        X_train=[[1.0, 2.0]], y_train=[3.0], X_test=[[4.0, 5.0]]
-    )
+    req = NoriPredictRequest(X_train=[[1.0, 2.0]], y_train=[3.0], X_test=[[4.0, 5.0]])
     assert req.to_wire() == {
         "X_train": [[1.0, 2.0]],
         "y_train": [3.0],
@@ -1316,9 +1333,7 @@ def test_request_model_omits_unset_distribution_fields_on_the_wire():
 
 
 def test_response_model_parses_predictions():
-    resp = NoriPredictResponse(
-        **{"task": "regression", "predictions": [1.0, 2.0, 3.0]}
-    )
+    resp = NoriPredictResponse(**{"task": "regression", "predictions": [1.0, 2.0, 3.0]})
     assert resp.predictions == [1.0, 2.0, 3.0]
 
 
@@ -1339,9 +1354,7 @@ def test_local_predict_raises_helpful_error_without_package(monkeypatch):
 
     client = SynthefyNoriClient(mode="local", model="nori-30m")
     with pytest.raises(ImportError, match=r"synthefy\[local\]"):
-        client.predict(
-            X_train=[[1.0, 2.0]], y_train=[3.0], X_test=[[4.0, 5.0]]
-        )
+        client.predict(X_train=[[1.0, 2.0]], y_train=[3.0], X_test=[[4.0, 5.0]])
 
 
 def test_local_predict_validates_shapes_before_import():
@@ -1395,6 +1408,7 @@ def test_model_variant_resolves_gateway_and_local():
     craw = SynthefyNoriClient(api_key="k", model="synthefy/custom")
     assert craw.model == "synthefy/custom" and craw._local_variant is None
 
+
 def test_model_is_required_no_default():
     # There is no default model -- omitting model= raises (every request names a size).
     with pytest.raises(ValueError, match="model is required"):
@@ -1411,7 +1425,12 @@ def test_no_bare_nori_slug():
     # The ambiguous bare selectors are gone -- only size-explicit names/slugs resolve.
     assert "nori" not in NORI_VARIANTS
     assert "synthefy/nori" not in NORI_VARIANTS
-    assert set(NORI_VARIANTS) >= {"nori-6m", "nori-30m", "synthefy/nori-6m", "synthefy/nori-30m"}
+    assert set(NORI_VARIANTS) >= {
+        "nori-6m",
+        "nori-30m",
+        "synthefy/nori-6m",
+        "synthefy/nori-30m",
+    }
 
 
 def test_remote_body_uses_variant_gateway_slug():
@@ -1429,7 +1448,9 @@ def test_local_mode_passes_variant_to_predict(monkeypatch):
         seen["model"] = model
         return [0.0]
 
-    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
+    monkeypatch.setattr(
+        "synthefy.nori_client._load_local_predict", lambda: fake_predict
+    )
     client = SynthefyNoriClient(mode="local", model="nori-30m")
     client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
     assert seen["model"] == "nori-30m"
@@ -1442,7 +1463,9 @@ def test_local_mode_nori_6m_forces_base_variant(monkeypatch):
         seen["model"] = model
         return [0.0]
 
-    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
+    monkeypatch.setattr(
+        "synthefy.nori_client._load_local_predict", lambda: fake_predict
+    )
     client = SynthefyNoriClient(mode="local", model="nori-6m")  # base 6M
     client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
     # nori-6m forwards its variant explicitly so local loads the base, not the package's 30M default
@@ -1479,7 +1502,14 @@ def test_is_thinking_model_matches_released_medium_selector():
         "nori-30m-thinking-medium",
     ):
         assert _is_thinking_model(name)
-    for name in ("nori", "nori-6m", "nori-30m", "synthefy/nori", "synthefy/custom", None):
+    for name in (
+        "nori",
+        "nori-6m",
+        "nori-30m",
+        "synthefy/nori",
+        "synthefy/custom",
+        None,
+    ):
         assert not _is_thinking_model(name)
 
 
@@ -1581,9 +1611,7 @@ def test_remote_bank_strategy_raises_with_guidance():
     client = SynthefyNoriClient(api_key="k", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0], capture))
     with pytest.raises(ValueError, match="snap-mean"):
-        client.predict(
-            X_train=_XTR, y_train=_YTR, X_test=_XTE, discretize="map-cell"
-        )
+        client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE, discretize="map-cell")
     assert "body" not in capture
 
 
@@ -1629,8 +1657,12 @@ def test_local_mode_passes_discretize_and_levels(monkeypatch):
         seen.update(kwargs)
         return [1.0]
 
-    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
-    monkeypatch.setattr("synthefy.nori_client._local_discretize_available", lambda: True)
+    monkeypatch.setattr(
+        "synthefy.nori_client._load_local_predict", lambda: fake_predict
+    )
+    monkeypatch.setattr(
+        "synthefy.nori_client._local_discretize_available", lambda: True
+    )
     client = SynthefyNoriClient(mode="local", model="nori-30m")
     client.predict(
         X_train=_XTR,
@@ -1651,8 +1683,12 @@ def test_local_mode_levels_alone_activate_package_default(monkeypatch):
         seen.update(kwargs)
         return [1.0]
 
-    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
-    monkeypatch.setattr("synthefy.nori_client._local_discretize_available", lambda: True)
+    monkeypatch.setattr(
+        "synthefy.nori_client._load_local_predict", lambda: fake_predict
+    )
+    monkeypatch.setattr(
+        "synthefy.nori_client._local_discretize_available", lambda: True
+    )
     client = SynthefyNoriClient(mode="local", model="nori-30m")
     client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE, categorical_levels=[1, 2])
     assert "discretize" not in seen  # package picks its own default (map-cell)
@@ -1664,7 +1700,9 @@ def test_local_mode_without_discretize_sends_only_required_model(monkeypatch):
         assert model == "nori-30m"
         return [1.0]
 
-    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: strict_predict)
+    monkeypatch.setattr(
+        "synthefy.nori_client._load_local_predict", lambda: strict_predict
+    )
     client = SynthefyNoriClient(mode="local", model="nori-30m")
     assert client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE) == [1.0]
 
@@ -1679,7 +1717,9 @@ def test_local_mode_preserves_degradation_warning_and_message(monkeypatch):
         warnings.warn(message, LocalDegradationWarning)
         return [1.0]
 
-    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: degraded_predict)
+    monkeypatch.setattr(
+        "synthefy.nori_client._load_local_predict", lambda: degraded_predict
+    )
     client = SynthefyNoriClient(mode="local", model="nori-30m")
 
     with pytest.warns(LocalDegradationWarning, match="SVD fit failed") as caught:
@@ -1698,14 +1738,18 @@ def test_local_mode_preserves_strict_degradation_error_and_message(monkeypatch):
         warnings.warn(message, LocalDegradationWarning)
         return [1.0]
 
-    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: degraded_predict)
+    monkeypatch.setattr(
+        "synthefy.nori_client._load_local_predict", lambda: degraded_predict
+    )
     client = SynthefyNoriClient(mode="local", model="nori-30m")
 
     with warnings.catch_warnings():
         # synthefy_nori.strict_pipeline(SvdFallbackWarning) uses this same standard-library
         # filter mechanism. The client must not catch, wrap, or rewrite the resulting exception.
         warnings.simplefilter("error", LocalDegradationWarning)
-        with pytest.raises(LocalDegradationWarning, match="SVD transform failed") as caught:
+        with pytest.raises(
+            LocalDegradationWarning, match="SVD transform failed"
+        ) as caught:
             client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE)
 
     assert str(caught.value) == message
@@ -1713,9 +1757,11 @@ def test_local_mode_preserves_strict_degradation_error_and_message(monkeypatch):
 
 def test_local_discretize_needs_newer_synthefy_nori(monkeypatch):
     monkeypatch.setattr(
-        "synthefy.nori_client._load_local_predict", lambda: (lambda *a, **k: [1.0])
+        "synthefy.nori_client._load_local_predict", lambda: lambda *a, **k: [1.0]
     )
-    monkeypatch.setattr("synthefy.nori_client._local_discretize_available", lambda: False)
+    monkeypatch.setattr(
+        "synthefy.nori_client._local_discretize_available", lambda: False
+    )
     client = SynthefyNoriClient(mode="local", model="nori-30m")
     with pytest.raises(ImportError, match=r"synthefy\[local\]"):
         client.predict(X_train=_XTR, y_train=_YTR, X_test=_XTE, discretize="map-cell")
@@ -1830,6 +1876,7 @@ def test_text_device_is_forwarded_to_multimodal_preprocessor(monkeypatch):
 def _fake_embed(texts):
     """Deterministic 8-d embedding, so tests need no sentence-transformers/model."""
     import hashlib
+
     out = []
     for t in texts:
         h = hashlib.sha1(t.encode("utf-8")).digest()
@@ -1870,23 +1917,34 @@ def test_text_columns_embeds_client_side_and_sends_numeric():
     client = SynthefyNoriClient(api_key="test-key", model="nori-30m")
     _attach_mock(client, _ok_handler([1.0, 2.0], capture))
 
-    df_train = pd.DataFrame({
-        "x1": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-        "brand": ["a", "b", "a", "b", "a", "b"],           # categorical -> 1 col
-        "review": ["good", "bad", "ok", "great", "poor", "fine"],  # text -> SVD
-    })
-    df_test = pd.DataFrame({"x1": [1.5, 5.5], "brand": ["a", "b"],
-                            "review": ["nice", "awful"]})
+    df_train = pd.DataFrame(
+        {
+            "x1": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "brand": ["a", "b", "a", "b", "a", "b"],  # categorical -> 1 col
+            "review": ["good", "bad", "ok", "great", "poor", "fine"],  # text -> SVD
+        }
+    )
+    df_test = pd.DataFrame(
+        {"x1": [1.5, 5.5], "brand": ["a", "b"], "review": ["nice", "awful"]}
+    )
 
-    preds = client.predict(df_train, [1., 2., 3., 4., 5., 6.], df_test,
-                           text_columns=["review"], svd_dim=4, embedder=_fake_embed)
+    preds = client.predict(
+        df_train,
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        df_test,
+        text_columns=["review"],
+        svd_dim=4,
+        embedder=_fake_embed,
+    )
 
     assert preds == [1.0, 2.0]
     # x1 (numeric) + brand (1 categorical col) + 4 SVD text cols = 6 numeric features
     assert len(capture["body"]["X_train"][0]) == 6
     assert len(capture["body"]["X_test"][0]) == 6
     # the payload is fully numeric (text was embedded away client-side)
-    assert all(isinstance(v, (int, float)) for row in capture["body"]["X_test"] for v in row)
+    assert all(
+        isinstance(v, (int, float)) for row in capture["body"]["X_test"] for v in row
+    )
 
 
 def test_text_columns_requires_dataframe():
@@ -1936,6 +1994,7 @@ def _dist_handler(
     ``echo_output_type=False`` simulates a deployment that predates distribution
     output: it ignores the request's ``output_type`` and answers with means.
     """
+
     def handler(request: httpx.Request) -> httpx.Response:
         capture["body"] = json.loads(request.content)
         body: Dict = {"task": "regression", "predictions": predictions}
@@ -2042,16 +2101,22 @@ def test_the_server_rejection_message_is_surfaced_unchanged():
     not duplicated, because a second copy of behaviour would drift in a way a schema comparison
     cannot see. This exercises one of those: cache=False with a cache-only field.
     """
-    detail = ("Invalid 'memory_policy': 1 validation error for MemoryPolicy\n  Value error, "
-              "cache=False cannot be combined with cache_dtype")
+    detail = (
+        "Invalid 'memory_policy': 1 validation error for MemoryPolicy\n  Value error, "
+        "cache=False cannot be combined with cache_dtype"
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, json={"error": {"detail": detail}})
 
     client = _client_with(handler)
     with pytest.raises(BadRequestError) as excinfo:
-        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST,
-                       memory_policy={"cache": False, "cache_dtype": "int8"})
+        client.predict(
+            _X_TRAIN,
+            _Y_TRAIN,
+            _X_TEST,
+            memory_policy={"cache": False, "cache_dtype": "int8"},
+        )
     assert "cannot be combined" in str(excinfo.value)
 
 
@@ -2065,13 +2130,18 @@ def test_an_unknown_field_is_now_caught_locally_without_a_round_trip():
 def test_the_request_model_accepts_both_shapes():
     from synthefy import MemoryPolicy, NoriPredictRequest
 
-    assert NoriPredictRequest(
-        X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST, memory_policy="exact"
-    ).memory_policy == "exact"
+    assert (
+        NoriPredictRequest(
+            X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST, memory_policy="exact"
+        ).memory_policy
+        == "exact"
+    )
     # A dict is COERCED into the typed model by pydantic, which is the point of the field
     # being MemoryPolicy: bounds, enums and unknown-field rejection happen before any request.
     coerced = NoriPredictRequest(
-        X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST,
+        X_train=_X_TRAIN,
+        y_train=_Y_TRAIN,
+        X_test=_X_TEST,
         memory_policy={"cache_dtype": "int8"},
     ).memory_policy
     assert isinstance(coerced, MemoryPolicy)
@@ -2085,9 +2155,12 @@ def test_the_request_model_accepts_both_shapes():
         memory_policy={"cache_dtype": "int8"},
     ).to_wire()["memory_policy"] == {"cache_dtype": "int8"}
     # Unset by default, so the field cannot change an existing caller's payload.
-    assert NoriPredictRequest(
-        X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST
-    ).memory_policy is None
+    assert (
+        NoriPredictRequest(
+            X_train=_X_TRAIN, y_train=_Y_TRAIN, X_test=_X_TEST
+        ).memory_policy
+        is None
+    )
 
 
 def test_local_mode_refuses_memory_on_an_old_synthefy_nori(monkeypatch):
@@ -2096,7 +2169,9 @@ def test_local_mode_refuses_memory_on_an_old_synthefy_nori(monkeypatch):
 
     monkeypatch.setattr(module, "_local_memory_policy_available", lambda: False)
     monkeypatch.setattr(module, "_local_available", lambda: True)
-    monkeypatch.setattr(module, "_load_local_predict", lambda: (lambda *a, **k: [0.0, 0.0]))
+    monkeypatch.setattr(
+        module, "_load_local_predict", lambda: lambda *a, **k: [0.0, 0.0]
+    )
     client = SynthefyNoriClient(model="nori-30m", mode="local")
     with pytest.raises(ImportError, match="0.13.0"):
         client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy="exact")
@@ -2155,10 +2230,15 @@ def test_a_policy_object_is_serialised_for_the_wire():
     capture: Dict = {}
     client = _client_with(_memory_handler(capture, _REPORT))
     # As a real MemoryPolicy looks: inputs set, resolve()'s outputs still None.
-    policy = _FakePolicy({
-        "cache": True, "cache_dtype": "int8", "gpu_budget_absolute_gb": None,
-        "rung": None, "est_cache_gb": None,
-    })
+    policy = _FakePolicy(
+        {
+            "cache": True,
+            "cache_dtype": "int8",
+            "gpu_budget_absolute_gb": None,
+            "rung": None,
+            "est_cache_gb": None,
+        }
+    )
     client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy=policy)
     sent = capture["body"]["memory_policy"]
     assert sent == {"cache": True, "cache_dtype": "int8"}
@@ -2176,14 +2256,18 @@ def test_feeding_a_resolved_report_back_in_is_caught_locally():
     """
     client = _client_with(_memory_handler({}, _REPORT))
     with pytest.raises(ValueError, match="rung"):
-        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST,
-                       memory_policy={"cache": True, "rung": "resident_bf16"})
+        client.predict(
+            _X_TRAIN,
+            _Y_TRAIN,
+            _X_TEST,
+            memory_policy={"cache": True, "rung": "resident_bf16"},
+        )
 
 
 def test_a_nonsense_memory_policy_type_is_rejected_locally():
     """One error type for every bad policy, from pydantic, before any request is sent."""
     client = _client_with(_memory_handler({}, _REPORT))
-    with pytest.raises(ValueError):   # pydantic ValidationError subclasses ValueError
+    with pytest.raises(ValueError):  # pydantic ValidationError subclasses ValueError
         client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy=object())
 
 
@@ -2200,7 +2284,9 @@ def test_an_unknown_preset_is_caught_locally():
 def test_out_of_range_values_are_caught_locally():
     client = _client_with(_memory_handler({}, _REPORT))
     with pytest.raises(ValueError):
-        client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy={"gpu_budget_frac": 1.5})
+        client.predict(
+            _X_TRAIN, _Y_TRAIN, _X_TEST, memory_policy={"gpu_budget_frac": 1.5}
+        )
 
 
 @pytest.mark.skipif(
@@ -2218,8 +2304,12 @@ def test_the_real_memory_policy_round_trips_through_the_client():
 
     capture: Dict = {}
     client = _client_with(_memory_handler(capture, _REPORT))
-    client.predict(_X_TRAIN, _Y_TRAIN, _X_TEST,
-                   memory_policy=MemoryPolicy(cache_dtype="int8", gpu_budget_frac=0.6))
+    client.predict(
+        _X_TRAIN,
+        _Y_TRAIN,
+        _X_TEST,
+        memory_policy=MemoryPolicy(cache_dtype="int8", gpu_budget_frac=0.6),
+    )
     sent = capture["body"]["memory_policy"]
     assert sent["cache_dtype"] == "int8" and sent["gpu_budget_frac"] == 0.6
     assert "rung" not in sent, "an unresolved policy must not carry decided outputs"
@@ -2256,7 +2346,9 @@ def test_empty_quantiles_raises():
         client.predict(_XTR, _YTR, _XTE, output_type="quantiles", quantiles=[])
 
 
-@pytest.mark.parametrize("bad", [[0.0], [1.0], [1.5], [-0.1], [0.5, 1.0], [float("nan")]])
+@pytest.mark.parametrize(
+    "bad", [[0.0], [1.0], [1.5], [-0.1], [0.5, 1.0], [float("nan")]]
+)
 def test_quantiles_must_lie_strictly_inside_the_unit_interval(bad):
     client = _remote_client()
     _attach_mock(client, _ok_handler([1.0], {}))
@@ -2295,9 +2387,7 @@ def test_output_type_is_validated_before_any_expensive_work():
     client = _remote_client()
     _attach_mock(client, _ok_handler([1.0], {}))
     with pytest.raises(ValueError, match="output_type must be one of"):
-        client.predict(
-            _XTR, _YTR, _XTE, output_type="nope", text_columns=["review"]
-        )
+        client.predict(_XTR, _YTR, _XTE, output_type="nope", text_columns=["review"])
 
 
 # ----------------------------------------------------- remote: wire format
@@ -2317,16 +2407,22 @@ def test_remote_quantiles_sends_the_levels_and_returns_level_major():
     capture: Dict = {}
     client = _remote_client()
     # Wire is row-major: one row per query row, one column per level.
-    _attach_mock(client, _dist_handler(
-        capture,
-        predictions=[1.0, 2.0],
-        quantiles=[[0.5, 1.0, 1.5], [1.5, 2.0, 2.5]],
-        taus=_LEVELS,
-    ))
+    _attach_mock(
+        client,
+        _dist_handler(
+            capture,
+            predictions=[1.0, 2.0],
+            quantiles=[[0.5, 1.0, 1.5], [1.5, 2.0, 2.5]],
+            taus=_LEVELS,
+        ),
+    )
 
     lo, mid, hi = client.predict(
-        _XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]],
-        output_type="quantiles", quantiles=_LEVELS,
+        _XTR,
+        _YTR,
+        [[2.0, 2.0], [3.0, 3.0]],
+        output_type="quantiles",
+        quantiles=_LEVELS,
     )
 
     assert capture["body"]["output_type"] == "quantiles"
@@ -2340,13 +2436,16 @@ def test_remote_quantiles_sends_the_levels_and_returns_level_major():
 def test_remote_quantiles_preserve_memory_policy_and_report():
     capture: Dict = {}
     client = _remote_client()
-    _attach_mock(client, _dist_handler(
-        capture,
-        predictions=[1.0],
-        quantiles=[[0.5, 1.0, 1.5]],
-        taus=_LEVELS,
-        memory_report=_REPORT,
-    ))
+    _attach_mock(
+        client,
+        _dist_handler(
+            capture,
+            predictions=[1.0],
+            quantiles=[[0.5, 1.0, 1.5]],
+            taus=_LEVELS,
+            memory_report=_REPORT,
+        ),
+    )
 
     client.predict(
         _XTR,
@@ -2365,10 +2464,15 @@ def test_remote_quantiles_preserve_the_requested_level_order():
     # The rows follow the caller's order, not sorted order (same as NoriRegressor).
     capture: Dict = {}
     client = _remote_client()
-    _attach_mock(client, _dist_handler(
-        capture, predictions=[1.0],
-        quantiles=[[9.0, 1.0]], taus=[0.9, 0.1],
-    ))
+    _attach_mock(
+        client,
+        _dist_handler(
+            capture,
+            predictions=[1.0],
+            quantiles=[[9.0, 1.0]],
+            taus=[0.9, 0.1],
+        ),
+    )
     hi, lo = client.predict(
         _XTR, _YTR, [[2.0, 2.0]], output_type="quantiles", quantiles=[0.9, 0.1]
     )
@@ -2378,16 +2482,25 @@ def test_remote_quantiles_preserve_the_requested_level_order():
 
 def test_remote_quantiles_as_pandas_is_a_frame_keyed_by_level():
     client = _remote_client()
-    _attach_mock(client, _dist_handler(
-        {}, predictions=[1.0, 2.0],
-        quantiles=[[0.5, 1.0, 1.5], [1.5, 2.0, 2.5]], taus=_LEVELS,
-    ))
+    _attach_mock(
+        client,
+        _dist_handler(
+            {},
+            predictions=[1.0, 2.0],
+            quantiles=[[0.5, 1.0, 1.5], [1.5, 2.0, 2.5]],
+            taus=_LEVELS,
+        ),
+    )
     X_test = pd.DataFrame({"a": [2.0, 3.0], "b": [2.0, 3.0]}, index=["r1", "r2"])
     y_train = pd.Series([1.0, 1.0, 2.0], name="price")
 
     out = client.predict(
-        pd.DataFrame(_XTR, columns=["a", "b"]), y_train, X_test,
-        output_type="quantiles", quantiles=_LEVELS, as_pandas=True,
+        pd.DataFrame(_XTR, columns=["a", "b"]),
+        y_train,
+        X_test,
+        output_type="quantiles",
+        quantiles=_LEVELS,
+        as_pandas=True,
     )
 
     assert isinstance(out, pd.DataFrame)
@@ -2401,15 +2514,18 @@ def test_remote_full_returns_the_whole_bank():
     capture: Dict = {}
     client = _remote_client()
     taus = [0.25, 0.5, 0.75]
-    _attach_mock(client, _dist_handler(
-        capture, predictions=[1.0, 2.0],
-        quantiles=[[0.0, 1.0, 2.0], [1.0, 2.0, 3.0]], taus=taus,
-        output_type="full",
-    ))
-
-    out = client.predict(
-        _XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]], output_type="full"
+    _attach_mock(
+        client,
+        _dist_handler(
+            capture,
+            predictions=[1.0, 2.0],
+            quantiles=[[0.0, 1.0, 2.0], [1.0, 2.0, 3.0]],
+            taus=taus,
+            output_type="full",
+        ),
     )
+
+    out = client.predict(_XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]], output_type="full")
 
     assert capture["body"]["output_type"] == "full"
     assert "quantiles" not in capture["body"]  # no levels needed for "full"
@@ -2421,16 +2537,24 @@ def test_remote_full_returns_the_whole_bank():
 
 def test_remote_full_as_pandas_gives_a_frame_and_a_series():
     client = _remote_client()
-    _attach_mock(client, _dist_handler(
-        {}, predictions=[1.0, 2.0],
-        quantiles=[[0.0, 2.0], [1.0, 3.0]], taus=[0.25, 0.75],
-        output_type="full",
-    ))
+    _attach_mock(
+        client,
+        _dist_handler(
+            {},
+            predictions=[1.0, 2.0],
+            quantiles=[[0.0, 2.0], [1.0, 3.0]],
+            taus=[0.25, 0.75],
+            output_type="full",
+        ),
+    )
     X_test = pd.DataFrame({"a": [2.0, 3.0], "b": [2.0, 3.0]}, index=[7, 8])
 
     out = client.predict(
-        pd.DataFrame(_XTR, columns=["a", "b"]), pd.Series(_YTR, name="y"), X_test,
-        output_type="full", as_pandas=True,
+        pd.DataFrame(_XTR, columns=["a", "b"]),
+        pd.Series(_YTR, name="y"),
+        X_test,
+        output_type="full",
+        as_pandas=True,
     )
 
     assert list(out["quantiles"].columns) == ["y[0.25]", "y[0.75]"]
@@ -2443,12 +2567,15 @@ def test_remote_full_as_pandas_gives_a_frame_and_a_series():
 def test_remote_median_returns_one_value_per_row():
     capture: Dict = {}
     client = _remote_client()
-    _attach_mock(client, _dist_handler(
-        capture, predictions=[3.0, 4.0], output_type="median",
-    ))
-    preds = client.predict(
-        _XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]], output_type="median"
+    _attach_mock(
+        client,
+        _dist_handler(
+            capture,
+            predictions=[3.0, 4.0],
+            output_type="median",
+        ),
     )
+    preds = client.predict(_XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]], output_type="median")
     assert capture["body"]["output_type"] == "median"
     assert preds == [3.0, 4.0]
 
@@ -2469,18 +2596,28 @@ def test_remote_deployment_that_ignores_output_type_raises(kwargs):
     # are indistinguishable from a real "median" result, so without the echo the
     # client would hand back a confidently wrong answer.
     client = _remote_client()
-    _attach_mock(client, _dist_handler(
-        {}, predictions=[1.0], echo_output_type=False,
-    ))
+    _attach_mock(
+        client,
+        _dist_handler(
+            {},
+            predictions=[1.0],
+            echo_output_type=False,
+        ),
+    )
     with pytest.raises(ValueError, match="predates distribution output"):
         client.predict(_XTR, _YTR, [[2.0, 2.0]], **kwargs)
 
 
 def test_remote_echoing_a_different_output_type_raises():
     client = _remote_client()
-    _attach_mock(client, _dist_handler(
-        {}, predictions=[1.0], output_type="mean",
-    ))
+    _attach_mock(
+        client,
+        _dist_handler(
+            {},
+            predictions=[1.0],
+            output_type="mean",
+        ),
+    )
     with pytest.raises(ValueError, match="honored output_type='mean' instead"):
         client.predict(_XTR, _YTR, [[2.0, 2.0]], output_type="median")
 
@@ -2504,23 +2641,36 @@ def test_remote_default_output_type_needs_no_echo():
 
 def test_remote_malformed_quantile_block_shape_raises():
     client = _remote_client()
-    _attach_mock(client, _dist_handler(
-        {}, predictions=[1.0, 2.0],
-        quantiles=[[0.5, 1.0, 1.5]],  # 1 row for 2 query rows
-        taus=_LEVELS,
-    ))
+    _attach_mock(
+        client,
+        _dist_handler(
+            {},
+            predictions=[1.0, 2.0],
+            quantiles=[[0.5, 1.0, 1.5]],  # 1 row for 2 query rows
+            taus=_LEVELS,
+        ),
+    )
     with pytest.raises(ValueError, match="quantile block of shape"):
         client.predict(
-            _XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]],
-            output_type="quantiles", quantiles=_LEVELS,
+            _XTR,
+            _YTR,
+            [[2.0, 2.0], [3.0, 3.0]],
+            output_type="quantiles",
+            quantiles=_LEVELS,
         )
 
 
 def test_remote_level_count_mismatch_raises():
     client = _remote_client()
-    _attach_mock(client, _dist_handler(
-        {}, predictions=[1.0], quantiles=[[0.5, 1.5]], taus=[0.1, 0.9],
-    ))
+    _attach_mock(
+        client,
+        _dist_handler(
+            {},
+            predictions=[1.0],
+            quantiles=[[0.5, 1.5]],
+            taus=[0.1, 0.9],
+        ),
+    )
     with pytest.raises(ValueError, match="server returned 2"):
         client.predict(
             _XTR, _YTR, [[2.0, 2.0]], output_type="quantiles", quantiles=_LEVELS
@@ -2531,9 +2681,15 @@ def test_remote_null_quantiles_come_back_as_nan():
     # JSON has no NaN, so the server nulls non-finite values; they must land as
     # NaN rather than None objects inside a numeric result.
     client = _remote_client()
-    _attach_mock(client, _dist_handler(
-        {}, predictions=[1.0], quantiles=[[0.5, None, 1.5]], taus=_LEVELS,
-    ))
+    _attach_mock(
+        client,
+        _dist_handler(
+            {},
+            predictions=[1.0],
+            quantiles=[[0.5, None, 1.5]],
+            taus=_LEVELS,
+        ),
+    )
     lo, mid, hi = client.predict(
         _XTR, _YTR, [[2.0, 2.0]], output_type="quantiles", quantiles=_LEVELS
     )
@@ -2542,13 +2698,15 @@ def test_remote_null_quantiles_come_back_as_nan():
 
 
 def test_response_model_parses_the_distribution_fields():
-    resp = NoriPredictResponse(**{
-        "task": "regression",
-        "predictions": [1.0],
-        "output_type": "quantiles",
-        "quantiles": [[0.5, 1.0, 1.5]],
-        "taus": _LEVELS,
-    })
+    resp = NoriPredictResponse(
+        **{
+            "task": "regression",
+            "predictions": [1.0],
+            "output_type": "quantiles",
+            "quantiles": [[0.5, 1.0, 1.5]],
+            "taus": _LEVELS,
+        }
+    )
     assert resp.output_type == "quantiles"
     assert resp.quantiles == [[0.5, 1.0, 1.5]]
     assert resp.taus == _LEVELS
@@ -2564,10 +2722,12 @@ def _fake_regressor_class(seen: Dict, *, with_model=True, with_output_type=True)
     simulate a synthefy-nori too old for it (the client probes the signatures).
     """
     if with_model:
+
         def __init__(self, model=None, memory_policy=None):
             seen["init_model"] = model
             seen["init_memory_policy"] = memory_policy
     else:
+
         def __init__(self):  # noqa: E306 - old build: no model= selector
             seen["init_model"] = "<absent>"
 
@@ -2576,9 +2736,12 @@ def _fake_regressor_class(seen: Dict, *, with_model=True, with_output_type=True)
         return self
 
     if with_output_type:
+
         def predict(self, X, *, output_type="mean", quantiles=None):
             seen["predict"] = {
-                "X": X, "output_type": output_type, "quantiles": quantiles,
+                "X": X,
+                "output_type": output_type,
+                "quantiles": quantiles,
             }
             n = len(X)
             if output_type == "quantiles":
@@ -2596,6 +2759,7 @@ def _fake_regressor_class(seen: Dict, *, with_model=True, with_output_type=True)
                 return {"quantiles": Q, "taus": taus, "mean": Q.mean(axis=1)}
             return np.arange(n, dtype=float)
     else:
+
         def predict(self, X):  # noqa: E306 - old build: mean only
             return np.arange(len(X), dtype=float)
 
@@ -2622,8 +2786,11 @@ def test_local_quantiles_route_through_the_estimator_api(monkeypatch):
     client = _local_client_with_fake(monkeypatch, seen)
 
     lo, mid, hi = client.predict(
-        _XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]],
-        output_type="quantiles", quantiles=_LEVELS,
+        _XTR,
+        _YTR,
+        [[2.0, 2.0], [3.0, 3.0]],
+        output_type="quantiles",
+        quantiles=_LEVELS,
     )
 
     assert seen["fit"][0] == _XTR and seen["fit"][1] == _YTR
@@ -2637,7 +2804,9 @@ def test_local_quantiles_route_through_the_estimator_api(monkeypatch):
 
 def test_local_quantiles_forward_memory_policy_to_the_estimator(monkeypatch):
     seen: Dict = {}
-    monkeypatch.setattr("synthefy.nori_client._local_memory_policy_available", lambda: True)
+    monkeypatch.setattr(
+        "synthefy.nori_client._local_memory_policy_available", lambda: True
+    )
     client = _local_client_with_fake(monkeypatch, seen)
 
     client.predict(
@@ -2669,9 +2838,7 @@ def test_local_full_returns_the_bank_dict(monkeypatch):
 def test_local_median_also_uses_the_estimator(monkeypatch):
     seen: Dict = {}
     client = _local_client_with_fake(monkeypatch, seen)
-    preds = client.predict(
-        _XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]], output_type="median"
-    )
+    preds = client.predict(_XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]], output_type="median")
     assert seen["predict"]["output_type"] == "median"
     assert preds == [0.0, 1.0]
 
@@ -2686,7 +2853,9 @@ def test_local_mean_still_uses_the_functional_predict(monkeypatch):
     def _boom():
         raise AssertionError("output_type='mean' must not load NoriRegressor")
 
-    monkeypatch.setattr("synthefy.nori_client._load_local_predict", lambda: fake_predict)
+    monkeypatch.setattr(
+        "synthefy.nori_client._load_local_predict", lambda: fake_predict
+    )
     monkeypatch.setattr("synthefy.nori_client._load_local_regressor", _boom)
     client = SynthefyNoriClient(mode="local", model="nori-30m")
     assert client.predict(_XTR, _YTR, _XTE) == [7.0]
@@ -2699,8 +2868,11 @@ def test_local_quantiles_as_pandas_frame(monkeypatch):
 
     out = client.predict(
         pd.DataFrame(_XTR, columns=["a", "b"]),
-        pd.Series(_YTR, name="score"), X_test,
-        output_type="quantiles", quantiles=[0.1, 0.9], as_pandas=True,
+        pd.Series(_YTR, name="score"),
+        X_test,
+        output_type="quantiles",
+        quantiles=[0.1, 0.9],
+        as_pandas=True,
     )
 
     assert list(out.columns) == ["score[0.1]", "score[0.9]"]
@@ -2712,18 +2884,14 @@ def test_local_output_type_needs_a_newer_synthefy_nori(monkeypatch):
     seen: Dict = {}
     client = _local_client_with_fake(monkeypatch, seen, with_output_type=False)
     with pytest.raises(ImportError, match=r"output_type=.*added in 0\.6\.0"):
-        client.predict(
-            _XTR, _YTR, _XTE, output_type="quantiles", quantiles=_LEVELS
-        )
+        client.predict(_XTR, _YTR, _XTE, output_type="quantiles", quantiles=_LEVELS)
 
 
 def test_local_variant_selector_needs_a_newer_synthefy_nori(monkeypatch):
     seen: Dict = {}
     client = _local_client_with_fake(monkeypatch, seen, with_model=False)
     with pytest.raises(ImportError, match="model= selector"):
-        client.predict(
-            _XTR, _YTR, _XTE, output_type="quantiles", quantiles=_LEVELS
-        )
+        client.predict(_XTR, _YTR, _XTE, output_type="quantiles", quantiles=_LEVELS)
 
 
 def test_local_quantiles_missing_package_raises_install_hint(monkeypatch):
@@ -2737,9 +2905,7 @@ def test_local_quantiles_missing_package_raises_install_hint(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake_import)
     client = SynthefyNoriClient(mode="local", model="nori-30m")
     with pytest.raises(ImportError, match=r"synthefy\[local\]"):
-        client.predict(
-            _XTR, _YTR, _XTE, output_type="quantiles", quantiles=_LEVELS
-        )
+        client.predict(_XTR, _YTR, _XTE, output_type="quantiles", quantiles=_LEVELS)
 
 
 def test_local_unexpected_quantile_shape_raises(monkeypatch):
@@ -2758,9 +2924,7 @@ def test_local_unexpected_quantile_shape_raises(monkeypatch):
     monkeypatch.setattr("synthefy.nori_client._load_local_regressor", lambda: _Wrong)
     client = SynthefyNoriClient(mode="local", model="nori-30m")
     with pytest.raises(ValueError, match="quantile array of shape"):
-        client.predict(
-            _XTR, _YTR, _XTE, output_type="quantiles", quantiles=_LEVELS
-        )
+        client.predict(_XTR, _YTR, _XTE, output_type="quantiles", quantiles=_LEVELS)
 
 
 @pytest.mark.slow
@@ -2788,7 +2952,7 @@ def test_local_quantiles_real_inference():
     Q = np.asarray(full["quantiles"])
     taus = np.asarray(full["taus"])
     assert Q.shape == (8, taus.shape[0])
-    assert np.all(np.diff(Q, axis=1) >= -1e-9)     # ascending per row
+    assert np.all(np.diff(Q, axis=1) >= -1e-9)  # ascending per row
     assert np.all((taus > 0.0) & (taus < 1.0))
     # "full"'s mean is the same quantity output_type="mean" collapses to.
     assert np.allclose(full["mean"], np.asarray(mean), atol=0.15)
@@ -2798,10 +2962,15 @@ def test_remote_drifted_quantile_levels_raise():
     # Columns are labeled from the request, so levels that came back different
     # would mean data at one tau labeled with another.
     client = _remote_client()
-    _attach_mock(client, _dist_handler(
-        {}, predictions=[1.0],
-        quantiles=[[0.5, 1.0, 1.5]], taus=[0.1, 0.5, 0.95],  # 0.9 -> 0.95
-    ))
+    _attach_mock(
+        client,
+        _dist_handler(
+            {},
+            predictions=[1.0],
+            quantiles=[[0.5, 1.0, 1.5]],
+            taus=[0.1, 0.5, 0.95],  # 0.9 -> 0.95
+        ),
+    )
     with pytest.raises(ValueError, match="server returned"):
         client.predict(
             _XTR, _YTR, [[2.0, 2.0]], output_type="quantiles", quantiles=_LEVELS
@@ -2810,13 +2979,20 @@ def test_remote_drifted_quantile_levels_raise():
 
 def test_remote_ragged_quantile_block_raises_a_clear_error():
     client = _remote_client()
-    _attach_mock(client, _dist_handler(
-        {}, predictions=[1.0, 2.0],
-        quantiles=[[0.5, 1.0, 1.5], [1.5, 2.0]],  # second row short
-        taus=_LEVELS,
-    ))
+    _attach_mock(
+        client,
+        _dist_handler(
+            {},
+            predictions=[1.0, 2.0],
+            quantiles=[[0.5, 1.0, 1.5], [1.5, 2.0]],  # second row short
+            taus=_LEVELS,
+        ),
+    )
     with pytest.raises(ValueError, match="rows of unequal length"):
         client.predict(
-            _XTR, _YTR, [[2.0, 2.0], [3.0, 3.0]],
-            output_type="quantiles", quantiles=_LEVELS,
+            _XTR,
+            _YTR,
+            [[2.0, 2.0], [3.0, 3.0]],
+            output_type="quantiles",
+            quantiles=_LEVELS,
         )
