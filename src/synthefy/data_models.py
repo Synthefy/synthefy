@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -47,6 +47,7 @@ class NoriPredictRequest(BaseModel):
     # cannot leave the field holding a value that contradicts its declared type.
     model_config = ConfigDict(validate_assignment=True)
 
+    model: Optional[Literal["nori-6m", "nori-30m", "nori-30m-thinking-medium"]] = None
     X_train: List[List[Optional[float]]]
     y_train: List[float]
     X_test: List[List[Optional[float]]]
@@ -91,7 +92,7 @@ class NoriPredictResponse(BaseModel):
         The model identity that produced the response. SageMaker returns this so
         the client can verify that a named endpoint served the requested model and
         fail closed instead of returning valid-looking predictions from the wrong
-        model specification.
+        peer model in the shared application.
     memory_report : dict, optional
         Present only when the request set ``memory_policy``: what the server actually did
         about it. See
@@ -261,31 +262,22 @@ class SingleEvalSamplePayload(BaseModel):
         if v is None:
             return v
         return [
-            None if (isinstance(val, float) and np.isnan(val)) else val
-            for val in v
+            None if (isinstance(val, float) and np.isnan(val)) else val for val in v
         ]
 
     @field_validator("history_values", "target_values")
     @classmethod
     def validate_values_length_match_timestamps(cls, v, info):
         """Validate that values and timestamps have the same length."""
-        if info.data.get("history_timestamps") and info.data.get(
-            "history_values"
-        ):
-            if len(info.data["history_timestamps"]) != len(
-                info.data["history_values"]
-            ):
+        if info.data.get("history_timestamps") and info.data.get("history_values"):
+            if len(info.data["history_timestamps"]) != len(info.data["history_values"]):
                 raise ValueError(
                     f"History timestamps and values must have the same length. "
                     f"Got {len(info.data['history_timestamps'])} and {len(info.data['history_values'])}"
                 )
 
-        if info.data.get("target_timestamps") and info.data.get(
-            "target_values"
-        ):
-            if len(info.data["target_timestamps"]) != len(
-                info.data["target_values"]
-            ):
+        if info.data.get("target_timestamps") and info.data.get("target_values"):
+            if len(info.data["target_timestamps"]) != len(info.data["target_values"]):
                 raise ValueError(
                     f"Target timestamps and values must have the same length. "
                     f"Got {len(info.data['target_timestamps'])} and {len(info.data['target_values'])}"
@@ -373,8 +365,7 @@ class SingleSampleForecastPayload(BaseModel):
         if v is None:
             return v
         return [
-            None if (isinstance(val, float) and np.isnan(val)) else val
-            for val in v
+            None if (isinstance(val, float) and np.isnan(val)) else val for val in v
         ]
 
     @field_validator("quantiles")
@@ -395,9 +386,7 @@ class SingleSampleForecastPayload(BaseModel):
     @classmethod
     def validate_values_length_match_timestamps(cls, v, info):
         """Validate that values and timestamps have the same length."""
-        if info.data.get("timestamps") and len(info.data["timestamps"]) != len(
-            v
-        ):
+        if info.data.get("timestamps") and len(info.data["timestamps"]) != len(v):
             raise ValueError(
                 f"Timestamps and values must have the same length. "
                 f"Got {len(info.data['timestamps'])} and {len(v)}"
@@ -653,9 +642,7 @@ class ForecastV2Request(BaseModel):
         backtesting = False
         if forecast_window is not None or stride is not None:
             if forecast_window is None or stride is None:
-                raise ValueError(
-                    "Forecast Window and Stride must be provided together"
-                )
+                raise ValueError("Forecast Window and Stride must be provided together")
             backtesting = True
 
         # Decide if we're splitting dataframes by date or by rows
@@ -894,24 +881,18 @@ class ForecastV2Request(BaseModel):
 
         samples = []
 
-        for i, (history_df, target_df) in enumerate(
-            zip(history_dfs, target_dfs)
-        ):
+        for i, (history_df, target_df) in enumerate(zip(history_dfs, target_dfs)):
             sample_row = []
 
             # Create sample for target column
             target_sample = SingleEvalSamplePayload(
                 sample_id=target_col,
-                history_timestamps=history_df[timestamp_col]
-                .astype(str)
-                .tolist(),
+                history_timestamps=history_df[timestamp_col].astype(str).tolist(),
                 history_values=cls._convert_nan_to_none(
                     history_df[target_col].tolist()
                 ),
                 target_timestamps=target_df[timestamp_col].astype(str).tolist(),
-                target_values=cls._convert_nan_to_none(
-                    target_df[target_col].tolist()
-                ),
+                target_values=cls._convert_nan_to_none(target_df[target_col].tolist()),
                 forecast=True,
                 metadata=False,
                 leak_target=target_col in leak_cols,
@@ -930,12 +911,8 @@ class ForecastV2Request(BaseModel):
                         history_values=cls._convert_nan_to_none(
                             history_df[col].tolist()
                         ),
-                        target_timestamps=target_df[timestamp_col]
-                        .astype(str)
-                        .tolist(),
-                        target_values=cls._convert_nan_to_none(
-                            target_df[col].tolist()
-                        ),
+                        target_timestamps=target_df[timestamp_col].astype(str).tolist(),
+                        target_values=cls._convert_nan_to_none(target_df[col].tolist()),
                         forecast=False,
                         metadata=True,
                         leak_target=col in leak_cols,
@@ -996,9 +973,7 @@ class ForecastV2Request(BaseModel):
         # Check that all DataFrames have the same columns
         all_required_cols = {target_col, timestamp_col} | set(metadata_cols)
 
-        for i, (history_df, target_df) in enumerate(
-            zip(history_dfs, target_dfs)
-        ):
+        for i, (history_df, target_df) in enumerate(zip(history_dfs, target_dfs)):
             # Check history DataFrame columns
             missing_in_history = all_required_cols - set(history_df.columns)
             if missing_in_history:
@@ -1071,15 +1046,11 @@ class ForecastV2Request(BaseModel):
             )
 
         if cutoff_date is None and num_target_rows is None:
-            raise ValueError(
-                "Either cutoff_date or num_target_rows must be provided"
-            )
+            raise ValueError("Either cutoff_date or num_target_rows must be provided")
 
         # Check forecast_window and stride consistency
         if (forecast_window is None) != (stride is None):
-            raise ValueError(
-                "Forecast window and stride must be provided together"
-            )
+            raise ValueError("Forecast window and stride must be provided together")
 
         # Check type consistency
         if forecast_window is not None and stride is not None:
@@ -1092,9 +1063,7 @@ class ForecastV2Request(BaseModel):
                         "forecast_window must be a string when using cutoff_date"
                     )
                 if not isinstance(stride, str):
-                    raise ValueError(
-                        "stride must be a string when using cutoff_date"
-                    )
+                    raise ValueError("stride must be a string when using cutoff_date")
             else:
                 # Row-based backtesting requires integer parameters
                 if not isinstance(num_target_rows, int):
@@ -1303,9 +1272,7 @@ class ForecastV2Request(BaseModel):
         leak_cols: List[str],
     ) -> List[SingleEvalSamplePayload]:
         """Create SingleEvalSamplePayload objects from history and target DataFrames."""
-        all_cols = target_cols + [
-            x for x in metadata_cols if x not in target_cols
-        ]
+        all_cols = target_cols + [x for x in metadata_cols if x not in target_cols]
 
         samples = []
         for col in all_cols:
@@ -1314,9 +1281,7 @@ class ForecastV2Request(BaseModel):
                 "datetime64[ns]"
             )
             history_values = history_df[col].values.astype(np.float64)
-            target_timestamps = target_df[timestamp_col].values.astype(
-                "datetime64[ns]"
-            )
+            target_timestamps = target_df[timestamp_col].values.astype("datetime64[ns]")
             target_values = target_df[col].values.astype(np.float64)
 
             # Convert timestamps to ISO format strings for the payload
@@ -1328,12 +1293,8 @@ class ForecastV2Request(BaseModel):
             )
 
             # Convert values to list and handle NaN
-            history_values_list = cls._convert_nan_to_none(
-                history_values.tolist()
-            )
-            target_values_list = cls._convert_nan_to_none(
-                target_values.tolist()
-            )
+            history_values_list = cls._convert_nan_to_none(history_values.tolist())
+            target_values_list = cls._convert_nan_to_none(target_values.tolist())
 
             sample = SingleEvalSamplePayload(
                 sample_id=col,
@@ -1547,21 +1508,15 @@ class ForecastV2Response(BaseModel):
                     pass  # df[column_name] = np.nan
                 else:
                     # Convert None back to NaN for DataFrame compatibility
-                    values = [
-                        np.nan if val is None else val
-                        for val in forecast.values
-                    ]
+                    values = [np.nan if val is None else val for val in forecast.values]
                     df[column_name] = values
 
                     # Add quantile columns if available
                     if forecast.quantiles is not None:
-                        for q_level, q_values in sorted(
-                            forecast.quantiles.items()
-                        ):
+                        for q_level, q_values in sorted(forecast.quantiles.items()):
                             quantile_column_name = f"{column_name}[{q_level}]"
                             quantile_values = [
-                                np.nan if val is None else val
-                                for val in q_values
+                                np.nan if val is None else val for val in q_values
                             ]
                             df[quantile_column_name] = quantile_values
 

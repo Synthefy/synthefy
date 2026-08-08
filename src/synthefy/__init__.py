@@ -1,4 +1,8 @@
-from synthefy.api_client import SynthefyAPIClient, SynthefyAsyncAPIClient
+from synthefy.api_client import (
+    SageMakerInvocationError,
+    SynthefyAPIClient,
+    SynthefyAsyncAPIClient,
+)
 from synthefy.nori_data_models import (
     MEMORY_PRESETS,
     MEMORY_RUNGS,
@@ -11,7 +15,7 @@ from synthefy.data_models import (
 )
 from synthefy.nori_client import SynthefyNoriClient
 
-__version__ = "6.3.0"
+__version__ = "6.4.0"
 
 __all__ = [
     "MEMORY_PRESETS",
@@ -21,6 +25,7 @@ __all__ = [
     "SynthefyAPIClient",
     "SynthefyAsyncAPIClient",
     "SynthefyNoriClient",
+    "SageMakerInvocationError",
     "NoriPredictRequest",
     "NoriPredictResponse",
     "__version__",

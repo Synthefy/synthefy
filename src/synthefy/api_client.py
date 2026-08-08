@@ -34,6 +34,21 @@ class APIConnectionError(SynthefyError):
     """The request failed due to a connection issue."""
 
 
+class SageMakerInvocationError(SynthefyError):
+    """A queued SageMaker inference wrote a failure object instead of predictions."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        invocation_id: str,
+        failure_location: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.invocation_id = invocation_id
+        self.failure_location = failure_location
+
+
 class APIStatusError(SynthefyError):
     """Raised when the API returns a non-2xx status code."""
 
