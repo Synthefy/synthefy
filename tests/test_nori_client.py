@@ -31,6 +31,7 @@ from synthefy.data_models import NoriPredictRequest, NoriPredictResponse
 from synthefy.nori_client import (
     GATEWAY_ENDPOINT,
     NORI_VARIANTS,
+    GATEWAY_MAX_BODY_BYTES,
     SAGEMAKER_MAX_BODY_BYTES,
     _is_thinking_model,
     _nullable_matrix,
@@ -421,6 +422,82 @@ def test_sagemaker_body_limit_matches_marketplace_runtime():
     # AWS Marketplace documents 25 MB as non-adjustable; a live runtime probe pins the decimal
     # byte boundary (25,000,000 is accepted, 25,000,001 returns HTTP 413).
     assert SAGEMAKER_MAX_BODY_BYTES == 25_000_000
+
+
+def test_gateway_body_limit_matches_the_measured_ingress_cap():
+    # Live probe: 66.8 MB reaches the model (400 on a deliberately invalid body) and 70.9 MB
+    # is refused by the ingress (413), bracketing 64 MiB. The per-model host caps identically,
+    # so this is the ingress' client_max_body_size, not a gateway feature.
+    assert GATEWAY_MAX_BODY_BYTES == 67_108_864
+
+
+def test_oversized_remote_body_is_refused_before_sending(monkeypatch):
+    """An oversized body must fail locally, not as an opaque nginx 413.
+
+    The ingress rejects with an HTML error page, which surfaces as a bare status error
+    carrying neither the limit nor the lever, so the check has to happen here.
+    """
+    from synthefy import nori_client as module
+
+    sent: list = []
+
+    def _never(*args, **kwargs):
+        sent.append(args)
+        raise AssertionError("an oversized body must not reach the network")
+
+    client = SynthefyNoriClient(mode="remote", model="nori-6m", api_key="secret")
+    monkeypatch.setattr(client, "_post_with_retries", _never)
+    monkeypatch.setattr(module, "GATEWAY_MAX_BODY_BYTES", 1)
+
+    with pytest.raises(ValueError) as excinfo:
+        client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
+
+    message = str(excinfo.value)
+    assert "hosted gateway" in message
+    assert "elements_budget" in message, "the message must name the lever"
+    assert "split" in message, "splitting changes predictions; the message must say so"
+    assert not sent, "nothing should have been sent"
+
+
+def test_a_body_at_exactly_the_limit_is_still_sent(monkeypatch):
+    """The boundary belongs to the caller: <= the cap is accepted by the ingress.
+
+    Guarding at the wrong side of the boundary would reject requests the service accepts.
+    """
+    from synthefy import nori_client as module
+
+    posted: list = []
+
+    class _Resp:
+        @staticmethod
+        def json():
+            return {"task": "regression", "predictions": [0.5]}
+
+    def _capture(endpoint, *, json, headers, timeout):
+        posted.append(json)
+        return _Resp()
+
+    client = SynthefyNoriClient(mode="remote", model="nori-6m", api_key="secret")
+    monkeypatch.setattr(client, "_post_with_retries", _capture)
+
+    import json as _json
+
+    payload_size = len(
+        _json.dumps(
+            {
+                "task": "regression",
+                "X_train": [[0.0], [1.0]],
+                "y_train": [0.0, 1.0],
+                "X_test": [[2.0]],
+                "model": "synthefy/nori-6m",
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    monkeypatch.setattr(module, "GATEWAY_MAX_BODY_BYTES", payload_size)
+
+    client.predict([[0.0], [1.0]], [0.0, 1.0], [[2.0]])
+    assert posted, "a body exactly at the limit must still be sent"
 
 
 # --------------------------------------------------------------------------- #

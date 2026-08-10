@@ -326,6 +326,14 @@ predictions = client.predict(
 print(predictions)  # -> [<float>, <float>]  (one per X_test row)
 ```
 
+The hosted gateway's ingress accepts request bodies up to 67,108,864 bytes (64 MiB),
+and the client checks the encoded JSON before sending so an oversized table fails
+immediately instead of returning the ingress' HTML error page. Addressing a deployment
+directly does not raise it: the same limit sits in front of both paths. To fit a larger
+table, send fewer context or query rows, or lower `memory_policy`'s `elements_budget`.
+The client does not split oversized requests, because every query row must see the same
+complete in-context training set and splitting would change the predictions.
+
 `X_train`, `y_train`, and `X_test` accept Python lists, numpy arrays, or pandas
 objects (a `DataFrame` for the feature matrices; a `Series` or single-column
 `DataFrame` for `y_train`). When both `X_train` and `X_test` are DataFrames,
