@@ -48,6 +48,16 @@ from synthefy.api_client import (
 GATEWAY_BASE_URL = "https://inference.baseten.co"
 GATEWAY_ENDPOINT = "/predict"
 
+# Hosted-gateway request-body limit, measured against the live service: 66.8 MB reaches the
+# model (it answers 400 on a deliberately invalid body) while 70.9 MB is refused by the
+# ingress with a 413, bracketing 64 MiB exactly. The same wall sits in front of a per-model
+# host, so addressing a deployment directly buys nothing. It is the ingress' own
+# ``client_max_body_size``, so no client or deployment setting can raise it.
+#
+# Checked locally for the same reason the SageMaker limit is: the refusal comes back as an
+# nginx HTML error page, which carries neither the limit nor what to do about it.
+GATEWAY_MAX_BODY_BYTES = 64 * 1024 * 1024
+
 # Environment variable holding the hosted-Nori API key. Matches SYNTHEFY_API_KEY
 # used by SynthefyAPIClient, so the whole package reads one naming scheme.
 NORI_API_KEY_ENV = "SYNTHEFY_NORI_API_KEY"
@@ -2075,6 +2085,8 @@ class SynthefyNoriClient:
         if self.model is not None:
             payload["model"] = self.model
 
+        self._check_gateway_body_size(payload)
+
         response = self._post_with_retries(
             self.endpoint,
             json=payload,
@@ -2085,6 +2097,33 @@ class SynthefyNoriClient:
             request,
             output_type=output_type,
             response_data=response.json(),
+        )
+
+    @staticmethod
+    def _check_gateway_body_size(payload: Dict[str, Any]) -> None:
+        """Refuse a body the hosted gateway's ingress will reject, before sending it.
+
+        The ingress answers an oversized request with an nginx HTML error page, which the
+        error path surfaces as a bare status error: no limit, no measurement, and nothing
+        the caller can act on. Measuring here costs one serialization of a body that is
+        about to be serialized anyway, and turns that into an actionable message.
+
+        The lever is ``memory_policy``'s ``elements_budget``: it lowers the batch
+        threshold so a table too large to send whole can still be served, at the cost of
+        the caller knowing to reach for it. Splitting the request is NOT a substitute --
+        every query row must see the same complete in-context training set, so splitting
+        changes the predictions rather than just the transport.
+        """
+        body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        if len(body) <= GATEWAY_MAX_BODY_BYTES:
+            return
+        raise ValueError(
+            f"The request body is {len(body):,} bytes, over the hosted gateway's "
+            f"{GATEWAY_MAX_BODY_BYTES:,}-byte ({GATEWAY_MAX_BODY_BYTES // (1024 * 1024)} MiB) "
+            "limit, so it would be refused by the ingress before reaching the model. Send "
+            "fewer context or query rows, or lower memory_policy's elements_budget. Do not "
+            "split the request across calls: every query row must see the same complete "
+            "in-context training set, so splitting changes the predictions."
         )
 
     def _predict_remote(

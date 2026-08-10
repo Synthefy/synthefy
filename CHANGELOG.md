@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Hosted (`mode="remote"`) requests are checked against the gateway's 67,108,864-byte
+  (64 MiB) ingress limit before they are sent. An oversized body previously surfaced as
+  the ingress' HTML error page wrapped in a bare status error, naming neither the limit
+  nor what to do about it; it now raises locally with the measured size, the cap, and the
+  `elements_budget` lever. As on SageMaker, oversized tables are not split: every query
+  row must see the same complete in-context training set.
+
 ## [6.3.0]
 
 ### Added
