@@ -1,5 +1,12 @@
 # Synthefy Python Client
 
+> [!IMPORTANT]
+> Development has moved to the consolidated
+> [`Synthefy/synthefy-nori`](https://github.com/Synthefy/synthefy-nori/tree/main/libs/synthefy)
+> source tree. The PyPI project remains `synthefy`; this repository is retained
+> for 6.x history and tags. See [the 7.0 migration guide](MIGRATION.md).
+
+
 | Branch | Status |
 |--------|--------|
 | `dev` | [![Tests](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml/badge.svg?branch=dev)](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml?query=branch%3Adev) |
