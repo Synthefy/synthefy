@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.4.0]
+
+### Added
+
+- Added `SynthefyNoriRelClient` for authenticated relational prediction jobs
+  against a customer-network Nori-Rel connector agent.
+- Added typed database registration, schema discovery, non-blocking `submit`,
+  blocking `predict`, cancellation, and pandas result handling.
+- Added AWS Secrets Manager and environment-variable credential references. Raw
+  database credentials are never accepted by the public API.
+
+### Security
+
+- Nori-Rel requires its own API key and agent URL through explicit arguments or
+  `SYNTHEFY_NORI_REL_API_KEY` and `SYNTHEFY_NORI_REL_BASE_URL`. It does not reuse
+  a forecasting or model-plane credential implicitly.
+
 ## [6.3.0]
 
 ### Added

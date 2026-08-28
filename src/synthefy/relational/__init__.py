@@ -1,0 +1,51 @@
+"""Enterprise relational prediction client."""
+
+from synthefy.relational.client import (
+    PredictionFailedError,
+    PredictionJob,
+    SynthefyNoriRelClient,
+)
+from synthefy.relational.models import (
+    Aggregation,
+    AwsSecret,
+    ConnectionStatus,
+    ConnectorCapabilities,
+    ConnectorType,
+    CredentialReference,
+    Database,
+    DatabaseCreateRequest,
+    DatabaseStatus,
+    EnvironmentCredential,
+    PredictionJobRecord,
+    PredictionRequest,
+    PredictionResult,
+    PredictionRow,
+    PredictionStatus,
+    RelationalOutputType,
+    SchemaGraph,
+    TableSchema,
+)
+
+__all__ = [
+    "Aggregation",
+    "AwsSecret",
+    "ConnectionStatus",
+    "ConnectorCapabilities",
+    "ConnectorType",
+    "CredentialReference",
+    "Database",
+    "DatabaseCreateRequest",
+    "DatabaseStatus",
+    "EnvironmentCredential",
+    "PredictionFailedError",
+    "PredictionJob",
+    "PredictionJobRecord",
+    "PredictionRequest",
+    "PredictionResult",
+    "PredictionRow",
+    "PredictionStatus",
+    "RelationalOutputType",
+    "SchemaGraph",
+    "TableSchema",
+    "SynthefyNoriRelClient",
+]

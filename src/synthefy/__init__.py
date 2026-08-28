@@ -10,8 +10,9 @@ from synthefy.data_models import (
     NoriPredictResponse,
 )
 from synthefy.nori_client import SynthefyNoriClient
+from synthefy.relational import SynthefyNoriRelClient
 
-__version__ = "6.3.0"
+__version__ = "6.4.0"
 
 __all__ = [
     "MEMORY_PRESETS",
@@ -21,6 +22,7 @@ __all__ = [
     "SynthefyAPIClient",
     "SynthefyAsyncAPIClient",
     "SynthefyNoriClient",
+    "SynthefyNoriRelClient",
     "NoriPredictRequest",
     "NoriPredictResponse",
     "__version__",

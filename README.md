@@ -5,11 +5,13 @@
 | `dev` | [![Tests](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml/badge.svg?branch=dev)](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml?query=branch%3Adev) |
 | `main` | [![Tests](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml/badge.svg?branch=main)](https://github.com/Synthefy/synthefy/actions/workflows/tests.yaml?query=branch%3Amain) |
 
-A Python client for the Synthefy API. It provides time series **forecasting** (synchronous and asynchronous) and **tabular in-context regression** via `SynthefyNoriClient` — which runs against the hosted endpoint, a named AWS SageMaker endpoint, or fully locally — with an easy-to-use interface, full type hints, and pydantic validation.
+A Python client for Synthefy forecasting, tabular in-context regression, and
+enterprise relational prediction with Nori-Rel.
 
 ## Features
 
 - **Tabular In-Context Regression**: `SynthefyNoriClient` predicts from labeled context rows in a single forward pass — hosted on Baseten or SageMaker, or fully local, no training step
+- **Relational Prediction**: `SynthefyNoriRelClient` submits typed prediction jobs to a connector agent running beside a customer PostgreSQL database
 - **Free Prediction Intervals**: the same forward pass carries a full predictive distribution, so `output_type="quantiles"` returns calibrated bands at no extra cost
 - **Sync & Async Support**: Separate clients for synchronous and asynchronous operations
 - **Professional Error Handling**: Comprehensive exception hierarchy with detailed error messages
@@ -689,7 +691,60 @@ Capability differs by mode:
 If your task is scored by squared error / R², don't discretize — the
 continuous mean is already optimal for those metrics.
 
+## Relational prediction
+
+`SynthefyNoriRelClient` talks to the Nori-Rel connector agent deployed in the
+customer network. The agent reads PostgreSQL through a read-only role, builds
+temporal relational features, and calls Nori; the public client never opens a
+database connection.
+
+```python
+from datetime import datetime, timezone
+
+from synthefy.relational import EnvironmentCredential, SynthefyNoriRelClient
+
+client = SynthefyNoriRelClient(
+    base_url="https://nori-rel.example.internal",
+    api_key="your-nori-rel-agent-key",
+)
+database = client.connect(
+    name="production-rds",
+    connector="postgresql",
+    credential=EnvironmentCredential(variable="NORI_REL_DATABASE_URL"),
+    tables=["drivers", "results"],
+    time_columns={"results": "race_date"},
+)
+predictions = client.predict(
+    database=database,
+    entity_table="drivers",
+    target="results.position",
+    event_time="results.race_date",
+    aggregation="first",
+    horizon="30 days",
+    as_of=datetime.now(timezone.utc),
+)
+```
+
+Use `submit(...)` instead of `predict(...)` to receive a durable job handle
+immediately. Database credentials are always indirect references: use
+`AwsSecret(secret_id=...)` in production or `EnvironmentCredential(variable=...)`
+for a locally managed agent secret.
+
 ## API Reference
+
+### SynthefyNoriRelClient (Relational Regression)
+
+- `SynthefyNoriRelClient(api_key=None, *, base_url=None, timeout=30.0,
+  max_retries=2)` authenticates to one connector agent. Arguments fall back to
+  `SYNTHEFY_NORI_REL_API_KEY` and `SYNTHEFY_NORI_REL_BASE_URL`.
+- `connect(...) -> Database` registers an indirect PostgreSQL credential and an
+  optional table allowlist/time-column map.
+- `test_connection(database) -> ConnectionStatus` checks the registered source.
+- `discover(database) -> SchemaGraph` returns columns, primary keys, foreign
+  keys, and configured time columns.
+- `submit(...) -> PredictionJob` creates a non-blocking durable job.
+- `predict(...) -> pandas.DataFrame` submits and waits for the same job.
+- `PredictionJob.wait()`, `refresh()`, and `cancel()` manage a submitted job.
 
 ### SynthefyNoriClient (Tabular Regression)
 
@@ -802,6 +857,8 @@ Each status error includes:
 
 - `SYNTHEFY_API_KEY`: Your Synthefy API key (forecasting client)
 - `SYNTHEFY_NORI_API_KEY`: Your hosted-Nori API key (`SynthefyNoriClient`)
+- `SYNTHEFY_NORI_REL_API_KEY`: Connector-agent API key (`SynthefyNoriRelClient`)
+- `SYNTHEFY_NORI_REL_BASE_URL`: Private connector-agent URL
 
 ## Support
 
