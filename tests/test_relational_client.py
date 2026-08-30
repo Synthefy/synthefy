@@ -98,10 +98,13 @@ def test_prediction_request_rejects_ambiguous_or_unsafe_contracts() -> None:
     common = {
         "database": "db-1",
         "entity_table": "drivers",
-        "target": "results.position",
-        "event_time": "results.race_date",
-        "aggregation": "first",
-        "horizon": "30 days",
+        "target": {
+            "kind": "temporal",
+            "column": "results.position",
+            "time_column": "results.race_date",
+            "operation": "next",
+            "lookahead": "30 days",
+        },
     }
 
     with pytest.raises(ValidationError, match="timezone"):
@@ -125,10 +128,14 @@ def test_predict_waits_for_job_and_returns_dataframe() -> None:
             body = json.loads(request.content)
             assert body["database"] == "db-1"
             assert body["entity_table"] == "drivers"
-            assert body["target"] == "results.position"
-            assert body["event_time"] == "results.race_date"
-            assert body["aggregation"] == "first"
-            assert body["horizon"] == "1 day"
+            assert body["task"] == "regression"
+            assert body["target"] == {
+                "kind": "temporal",
+                "column": "results.position",
+                "time_column": "results.race_date",
+                "operation": "next",
+                "lookahead": "1 day",
+            }
             assert body["as_of"] == "2026-08-28T10:00:00Z"
             return httpx.Response(202, json=_job("pending"))
         if request.url.path.endswith("/result"):
@@ -137,6 +144,7 @@ def test_predict_waits_for_job_and_returns_dataframe() -> None:
                 json={
                     "job_id": "job-1",
                     "entity_key": "drivers.driver_id",
+                    "task": "regression",
                     "output_type": "median",
                     "rows": [
                         {
@@ -216,6 +224,85 @@ def test_prediction_rejects_unknown_operation() -> None:
             operation="median",  # type: ignore[arg-type]
             lookahead="30 days",
         )
+    client.close()
+
+
+def test_direct_classification_sends_task_specific_contract() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(202, json=_job("pending"))
+
+    client = SynthefyNoriRelClient("key", base_url="https://unit.test")
+    _attach_mock(client, handler)
+    client.submit(
+        source="db-1",
+        entity="customers",
+        target="customers.churned",
+        task="classification",
+        positive_class=True,
+        decision_threshold=0.65,
+        entity_ids=[10, 11],
+    )
+
+    assert captured["task"] == "classification"
+    assert captured["target"] == {
+        "kind": "direct",
+        "column": "customers.churned",
+    }
+    assert captured["positive_class"] is True
+    assert captured["decision_threshold"] == 0.65
+    assert "output_type" not in captured
+    client.close()
+
+
+def test_temporal_parameters_are_all_or_none() -> None:
+    client = SynthefyNoriRelClient("key", base_url="https://unit.test")
+    with pytest.raises(ValueError, match="provided together"):
+        client.submit(
+            source="db-1",
+            entity="drivers",
+            target="results.position",
+            target_time="results.race_date",
+        )
+    client.close()
+
+
+def test_classification_result_has_label_and_probability_columns() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "job_id": "job-1",
+                "entity_key": "customers.customer_id",
+                "task": "classification",
+                "rows": [
+                    {
+                        "entity_id": 10,
+                        "as_of": "2026-08-28T10:00:00Z",
+                        "prediction": True,
+                        "probability": 0.82,
+                    }
+                ],
+                "metadata": {"model": "nori-30m-classification"},
+            },
+        )
+
+    client = SynthefyNoriRelClient("key", base_url="https://unit.test")
+    _attach_mock(client, handler)
+
+    result = client.get_result("job-1")
+
+    assert result.columns.tolist() == [
+        "entity_id",
+        "as_of",
+        "prediction",
+        "probability",
+    ]
+    assert bool(result.iloc[0]["prediction"]) is True
+    assert result.iloc[0]["probability"] == 0.82
+    assert result.attrs["task"] == "classification"
     client.close()
 
 

@@ -695,7 +695,7 @@ continuous mean is already optimal for those metrics.
 
 `SynthefyNoriRelClient` talks to the Nori-Rel connector agent deployed in the
 customer network. The agent reads PostgreSQL through a read-only role, builds
-temporal relational features, and calls Nori; the public client never opens a
+relational features, and calls the matching Nori model; the public client never opens a
 database connection.
 
 ```python
@@ -720,9 +720,28 @@ predictions = client.predict(
 )
 ```
 
+Time is optional. For a direct label already stored on the entity table, omit
+`target_time`, `operation`, and `lookahead`:
+
+```python
+predictions = client.predict(
+    source=source,
+    entity="customers",
+    target="customers.churned",
+    task="classification",
+    positive_class=True,
+)
+```
+
+Rows with a label train the model and rows with a null label are predicted. Pass
+`entity_ids` to select query rows explicitly; selected rows are excluded from the
+training context. Classification returns `prediction` and the positive-class
+`probability`. It uses `decision_threshold=0.5` unless another threshold is passed.
+
 `operation="next"` predicts the first target event after the snapshot time.
 Use `average`, `total`, `minimum`, `maximum`, or `count` to summarize every
-target event in the lookahead window.
+target event in the lookahead window. Temporal classification supports `next`;
+the aggregate operations are regression-only.
 
 This predicts from the latest available snapshot. Use `as_of` only for a
 historical run, passing a timezone-aware `datetime`.
@@ -734,7 +753,7 @@ for a locally managed agent secret.
 
 ## API Reference
 
-### SynthefyNoriRelClient (Relational Regression)
+### SynthefyNoriRelClient (Relational Prediction)
 
 - `SynthefyNoriRelClient(api_key=None, *, base_url=None, timeout=30.0,
   max_retries=2)` authenticates to one connector agent. Arguments fall back to
@@ -744,8 +763,9 @@ for a locally managed agent secret.
 - `test_connection(database) -> ConnectionStatus` checks the registered source.
 - `discover(database) -> SchemaGraph` returns columns, primary keys, foreign
   keys, and configured time columns.
-- `submit(source=..., entity=..., target=..., target_time=..., operation=...,
-  lookahead=...) -> PredictionJob` creates a non-blocking durable job.
+- `submit(source=..., entity=..., target=..., task=...) -> PredictionJob` creates
+  a non-blocking durable job. Add `target_time`, `operation`, and `lookahead`
+  together for a temporal target.
 - `predict(...) -> pandas.DataFrame` accepts the same prediction fields, submits,
   and waits for the result.
 - `PredictionJob.wait()`, `refresh()`, and `cancel()` manage a submitted job.

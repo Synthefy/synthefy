@@ -18,20 +18,25 @@ from synthefy.api_client import (
     _raise_for_status,
 )
 from synthefy.relational.models import (
-    Aggregation,
-    AwsSecret,
     ConnectionStatus,
     ConnectorType,
     CredentialReference,
     Database,
     DatabaseCreateRequest,
+    DirectTarget,
     PredictionJobRecord,
     PredictionRequest,
     PredictionResult,
     PredictionStatus,
     RelationalOutputType,
     SchemaGraph,
+    TargetDefinition,
+    TemporalTarget,
 )
+from synthefy.relational.models import (
+    PredictionOperation as WirePredictionOperation,
+)
+from synthefy.relational.models import PredictionTask as WirePredictionTask
 
 NORI_REL_BASE_URL_ENV = "SYNTHEFY_NORI_REL_BASE_URL"
 NORI_REL_API_KEY_ENV = "SYNTHEFY_NORI_REL_API_KEY"
@@ -45,14 +50,8 @@ _TERMINAL_STATUSES = frozenset(
 PredictionOperation = Literal[
     "next", "average", "total", "minimum", "maximum", "count"
 ]
-_OPERATION_AGGREGATIONS = {
-    "next": Aggregation.FIRST,
-    "average": Aggregation.MEAN,
-    "total": Aggregation.SUM,
-    "minimum": Aggregation.MIN,
-    "maximum": Aggregation.MAX,
-    "count": Aggregation.COUNT,
-}
+PredictionTask = Literal["regression", "classification"]
+_OPERATIONS = {operation.value for operation in WirePredictionOperation}
 
 
 class PredictionFailedError(RuntimeError):
@@ -237,12 +236,31 @@ class SynthefyNoriRelClient:
         return quote(value, safe="")
 
     @staticmethod
-    def _resolve_operation(operation: PredictionOperation) -> Aggregation:
-        try:
-            return _OPERATION_AGGREGATIONS[operation]
-        except KeyError as exc:
-            choices = ", ".join(_OPERATION_AGGREGATIONS)
-            raise ValueError(f"operation must be one of: {choices}") from exc
+    def _build_target(
+        target: str,
+        target_time: Optional[str],
+        operation: Optional[PredictionOperation],
+        lookahead: Optional[str],
+    ) -> TargetDefinition:
+        temporal = (target_time, operation, lookahead)
+        if all(value is None for value in temporal):
+            return DirectTarget(column=target)
+        if any(value is None for value in temporal):
+            raise ValueError(
+                "target_time, operation, and lookahead must be provided together"
+            )
+        assert target_time is not None
+        assert operation is not None
+        assert lookahead is not None
+        if operation not in _OPERATIONS:
+            choices = ", ".join(sorted(_OPERATIONS))
+            raise ValueError(f"operation must be one of: {choices}")
+        return TemporalTarget(
+            column=target,
+            time_column=target_time,
+            operation=operation,
+            lookahead=lookahead,
+        )
 
     def connect(
         self,
@@ -289,29 +307,32 @@ class SynthefyNoriRelClient:
         source: Union[Database, str],
         entity: str,
         target: str,
-        target_time: str,
-        operation: PredictionOperation,
-        lookahead: str,
+        task: Union[WirePredictionTask, PredictionTask, str] = "regression",
+        target_time: Optional[str] = None,
+        operation: Optional[PredictionOperation] = None,
+        lookahead: Optional[str] = None,
         as_of: Optional[datetime] = None,
         relationship_path: Optional[List[str]] = None,
         entity_ids: Optional[List[Any]] = None,
-        output_type: Union[RelationalOutputType, str] = RelationalOutputType.MEDIAN,
+        output_type: Optional[Union[RelationalOutputType, str]] = None,
         quantiles: Optional[List[float]] = None,
+        positive_class: Any = None,
+        decision_threshold: Optional[float] = None,
         idempotency_key: Optional[str] = None,
     ) -> PredictionJob:
         database_id = source.id if isinstance(source, Database) else source
         request = PredictionRequest(
             database=database_id,
             entity_table=entity,
-            target=target,
-            event_time=target_time,
-            aggregation=self._resolve_operation(operation),
-            horizon=lookahead,
+            task=task,
+            target=self._build_target(target, target_time, operation, lookahead),
             as_of=as_of,
             relationship_path=relationship_path,
             entity_ids=entity_ids,
             output_type=output_type,
             quantiles=quantiles,
+            positive_class=positive_class,
+            decision_threshold=decision_threshold,
         )
         response = self._request(
             "POST",
@@ -327,16 +348,17 @@ class SynthefyNoriRelClient:
         source: Union[Database, str],
         entity: str,
         target: str,
-        target_time: str,
-        operation: PredictionOperation,
-        lookahead: str,
+        task: Union[WirePredictionTask, PredictionTask, str] = "regression",
+        target_time: Optional[str] = None,
+        operation: Optional[PredictionOperation] = None,
+        lookahead: Optional[str] = None,
         as_of: Optional[datetime] = None,
         relationship_path: Optional[List[str]] = None,
         entity_ids: Optional[List[Any]] = None,
-        output_type: Union[
-            RelationalOutputType, str
-        ] = RelationalOutputType.MEDIAN,
+        output_type: Optional[Union[RelationalOutputType, str]] = None,
         quantiles: Optional[List[float]] = None,
+        positive_class: Any = None,
+        decision_threshold: Optional[float] = None,
         idempotency_key: Optional[str] = None,
         wait_timeout: Optional[float] = None,
         poll_interval: float = 1.0,
@@ -345,6 +367,7 @@ class SynthefyNoriRelClient:
             source=source,
             entity=entity,
             target=target,
+            task=task,
             target_time=target_time,
             operation=operation,
             lookahead=lookahead,
@@ -353,6 +376,8 @@ class SynthefyNoriRelClient:
             entity_ids=entity_ids,
             output_type=output_type,
             quantiles=quantiles,
+            positive_class=positive_class,
+            decision_threshold=decision_threshold,
             idempotency_key=idempotency_key,
         ).wait(
             timeout=wait_timeout, poll_interval=poll_interval
@@ -372,13 +397,23 @@ class SynthefyNoriRelClient:
         job_id = self._path_id(job_id)
         response = self._request("GET", f"/v1/predictions/{job_id}/result")
         result = PredictionResult.model_validate(response.json())
-        rows = [row.model_dump(mode="python") for row in result.rows]
+        excluded = (
+            {"probability"}
+            if result.task is WirePredictionTask.REGRESSION
+            else {"quantiles"}
+        )
+        rows = [
+            row.model_dump(mode="python", exclude=excluded) for row in result.rows
+        ]
         frame = pd.DataFrame(rows)
         frame.attrs.update(
             {
                 "job_id": result.job_id,
                 "entity_key": result.entity_key,
-                "output_type": result.output_type.value,
+                "task": result.task.value,
+                "output_type": (
+                    None if result.output_type is None else result.output_type.value
+                ),
                 "taus": result.taus,
                 "metadata": result.metadata,
             }

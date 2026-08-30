@@ -45,12 +45,17 @@ class PredictionStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-class Aggregation(str, Enum):
-    FIRST = "first"
-    MEAN = "mean"
-    SUM = "sum"
-    MIN = "min"
-    MAX = "max"
+class PredictionTask(str, Enum):
+    REGRESSION = "regression"
+    CLASSIFICATION = "classification"
+
+
+class PredictionOperation(str, Enum):
+    NEXT = "next"
+    AVERAGE = "average"
+    TOTAL = "total"
+    MINIMUM = "minimum"
+    MAXIMUM = "maximum"
     COUNT = "count"
 
 
@@ -58,6 +63,61 @@ class RelationalOutputType(str, Enum):
     MEAN = "mean"
     MEDIAN = "median"
     QUANTILES = "quantiles"
+
+
+class DirectTarget(WireModel):
+    kind: Literal["direct"] = "direct"
+    column: str
+
+    @field_validator("column")
+    @classmethod
+    def validate_column(cls, value: str) -> str:
+        value = value.strip()
+        if not _QUALIFIED_COLUMN.fullmatch(value):
+            raise ValueError("must be a qualified column in 'table.column' form")
+        return value
+
+
+class TemporalTarget(WireModel):
+    kind: Literal["temporal"] = "temporal"
+    column: str
+    time_column: str
+    operation: PredictionOperation
+    lookahead: str
+
+    @field_validator("column", "time_column")
+    @classmethod
+    def validate_column(cls, value: str) -> str:
+        value = value.strip()
+        if not _QUALIFIED_COLUMN.fullmatch(value):
+            raise ValueError("must be a qualified column in 'table.column' form")
+        return value
+
+    @field_validator("lookahead")
+    @classmethod
+    def normalize_lookahead(cls, value: str) -> str:
+        match = _DURATION.fullmatch(value.strip())
+        if match is None:
+            raise ValueError(
+                "lookahead must be a positive integer followed by seconds, minutes, "
+                "hours, days, or weeks"
+            )
+        amount = int(match.group("value"))
+        unit = match.group("unit").lower()
+        if amount == 1:
+            unit = unit.removesuffix("s")
+        elif not unit.endswith("s"):
+            unit += "s"
+        return f"{amount} {unit}"
+
+    @model_validator(mode="after")
+    def matching_tables(self) -> "TemporalTarget":
+        if self.column.split(".", 1)[0] != self.time_column.split(".", 1)[0]:
+            raise ValueError("column and time_column must belong to the same table")
+        return self
+
+
+TargetDefinition = Union[DirectTarget, TemporalTarget]
 
 
 class AwsSecret(BaseModel):
@@ -198,23 +258,15 @@ class SchemaGraph(WireModel):
 class PredictionRequest(WireModel):
     database: str = Field(min_length=1)
     entity_table: str = Field(min_length=1)
-    target: str
-    event_time: str
-    aggregation: Aggregation
-    horizon: str
+    task: PredictionTask = PredictionTask.REGRESSION
+    target: TargetDefinition = Field(discriminator="kind")
     as_of: Optional[datetime] = None
     relationship_path: Optional[List[str]] = None
     entity_ids: Optional[List[Any]] = None
-    output_type: RelationalOutputType = RelationalOutputType.MEDIAN
+    output_type: Optional[RelationalOutputType] = None
     quantiles: Optional[List[float]] = None
-
-    @field_validator("target", "event_time")
-    @classmethod
-    def validate_qualified_column(cls, value: str) -> str:
-        value = value.strip()
-        if not _QUALIFIED_COLUMN.fullmatch(value):
-            raise ValueError("must be a qualified column in 'table.column' form")
-        return value
+    positive_class: Any = None
+    decision_threshold: Optional[float] = Field(default=None, gt=0, lt=1)
 
     @field_validator("database", "entity_table")
     @classmethod
@@ -223,23 +275,6 @@ class PredictionRequest(WireModel):
         if not value:
             raise ValueError("must not be blank")
         return value
-
-    @field_validator("horizon")
-    @classmethod
-    def normalize_horizon(cls, value: str) -> str:
-        match = _DURATION.fullmatch(value.strip())
-        if match is None:
-            raise ValueError(
-                "horizon must be a positive integer followed by seconds, minutes, "
-                "hours, days, or weeks"
-            )
-        amount = int(match.group("value"))
-        unit = match.group("unit").lower()
-        if amount == 1:
-            unit = unit.removesuffix("s")
-        elif not unit.endswith("s"):
-            unit += "s"
-        return f"{amount} {unit}"
 
     @field_validator("as_of")
     @classmethod
@@ -257,12 +292,36 @@ class PredictionRequest(WireModel):
 
     @model_validator(mode="after")
     def validate_prediction(self) -> "PredictionRequest":
-        target_table, _ = self.target.split(".", 1)
-        time_table, _ = self.event_time.split(".", 1)
-        if target_table != time_table:
+        target_table, _ = self.target.column.split(".", 1)
+        if isinstance(self.target, DirectTarget) and target_table != self.entity_table:
             raise ValueError(
-                "version 1 requires target and event_time to belong to the same table"
+                "a direct target must belong to entity_table"
             )
+        if (
+            isinstance(self.target, DirectTarget)
+            and self.relationship_path not in (None, [self.entity_table])
+        ):
+            raise ValueError("a direct target does not need relationship_path")
+        if (
+            self.task == PredictionTask.CLASSIFICATION
+            and isinstance(self.target, TemporalTarget)
+            and self.target.operation != PredictionOperation.NEXT
+        ):
+            raise ValueError(
+                "temporal classification currently requires operation='next'"
+            )
+        if self.task == PredictionTask.CLASSIFICATION:
+            if self.output_type is not None or self.quantiles is not None:
+                raise ValueError(
+                    "classification does not support regression output options"
+                )
+            if self.decision_threshold is None:
+                self.decision_threshold = 0.5
+        else:
+            if self.positive_class is not None or self.decision_threshold is not None:
+                raise ValueError("classification options require task='classification'")
+            if self.output_type is None:
+                self.output_type = RelationalOutputType.MEDIAN
         if self.output_type == RelationalOutputType.QUANTILES:
             if not self.quantiles:
                 raise ValueError("quantiles are required for output_type='quantiles'")
@@ -270,8 +329,8 @@ class PredictionRequest(WireModel):
                 raise ValueError("quantiles must lie strictly between 0 and 1")
         elif self.quantiles is not None:
             raise ValueError("quantiles are only valid with output_type='quantiles'")
-        if self.relationship_path is not None and len(self.relationship_path) < 2:
-            raise ValueError("relationship_path must contain at least two table names")
+        if self.relationship_path is not None and not self.relationship_path:
+            raise ValueError("relationship_path must not be empty")
         if self.relationship_path is not None:
             if self.relationship_path[0] != self.entity_table:
                 raise ValueError("relationship_path must start at entity_table")
@@ -297,14 +356,36 @@ class PredictionJobRecord(WireModel):
 class PredictionRow(WireModel):
     entity_id: Any
     as_of: datetime
-    prediction: Optional[float]
+    prediction: Any
+    probability: Optional[float] = Field(default=None, ge=0, le=1)
     quantiles: Optional[List[Optional[float]]] = None
 
 
 class PredictionResult(WireModel):
     job_id: str
     entity_key: str
-    output_type: RelationalOutputType
+    task: PredictionTask
+    output_type: Optional[RelationalOutputType] = None
     rows: List[PredictionRow]
     taus: Optional[List[float]] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_rows(self) -> "PredictionResult":
+        if self.task == PredictionTask.REGRESSION:
+            if self.output_type is None:
+                raise ValueError("regression results require output_type")
+            if any(row.probability is not None for row in self.rows):
+                raise ValueError("regression results cannot contain probabilities")
+        else:
+            if self.output_type is not None or self.taus is not None:
+                raise ValueError(
+                    "classification results cannot contain regression output"
+                )
+            if any(row.quantiles is not None for row in self.rows):
+                raise ValueError("classification results cannot contain quantiles")
+            if any(row.probability is None for row in self.rows):
+                raise ValueError("classification results require probabilities")
+            if any(row.prediction is None for row in self.rows):
+                raise ValueError("classification results require predicted labels")
+        return self
