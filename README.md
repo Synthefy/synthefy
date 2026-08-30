@@ -308,7 +308,7 @@ confirm with me before making changes.
 Prefer not to run it locally? Use the hosted API instead — create a key at
 https://docs.synthefy.com/setup/api_key, then:
 `client = SynthefyNoriClient(api_key="YOUR_API_KEY", model="nori-30m")` (or set
-SYNTHEFY_NORI_API_KEY).
+SYNTHEFY_API_KEY).
 ````
 
 ### Hosted Usage (`mode="remote"`)
@@ -317,7 +317,7 @@ SYNTHEFY_NORI_API_KEY).
 from synthefy import SynthefyNoriClient
 
 # The key is sent as `Authorization: Bearer <key>` (gateway default).
-# Pass it explicitly or set the SYNTHEFY_NORI_API_KEY environment variable.
+# Pass it explicitly or set the SYNTHEFY_API_KEY environment variable.
 client = SynthefyNoriClient(api_key="your_api_key", model="nori-30m")
 
 predictions = client.predict(
@@ -411,7 +411,7 @@ gateway resolves that slug to a deployment, so you never name a deployment yours
 - The only credential is your **Synthefy Nori API key**, created in the Synthefy
   Console. It authenticates against the Baseten-hosted gateway, but you do not
   need a Baseten account.
-- Provide it via the `api_key` argument or the `SYNTHEFY_NORI_API_KEY`
+- Provide it via the `api_key` argument or the `SYNTHEFY_API_KEY`
   environment variable. It is sent as the header
   `Authorization: Bearer <key>`, which is what the gateway requires.
 
@@ -752,7 +752,7 @@ for a locally managed agent secret.
   - `mode`: `"remote"` (hosted, default), `"local"` (in-process via
     `synthefy-nori`), `"auto"` (local if installed, else remote), or
     `"sagemaker"` (a named SageMaker endpoint using the AWS credential chain).
-  - `api_key` (remote mode) falls back to the `SYNTHEFY_NORI_API_KEY`
+  - `api_key` (remote mode) falls back to the `SYNTHEFY_API_KEY`
     environment variable. Not required in local mode.
   - Hosted Nori is reached by gateway slug — that is the path Synthefy meters,
     rate-limits and grants per key. To target a single-model endpoint you host
@@ -855,8 +855,8 @@ Each status error includes:
 
 ### Environment Variables
 
-- `SYNTHEFY_API_KEY`: Your Synthefy API key (forecasting client)
-- `SYNTHEFY_NORI_API_KEY`: Your hosted-Nori API key (`SynthefyNoriClient`)
+- `SYNTHEFY_API_KEY`: Your Synthefy API key (forecasting and hosted Nori)
+- `SYNTHEFY_NORI_API_KEY`: Deprecated hosted-Nori alias
 - `SYNTHEFY_NORI_REL_API_KEY`: Connector-agent API key (`SynthefyNoriRelClient`)
 - `SYNTHEFY_NORI_REL_BASE_URL`: Private connector-agent URL
 

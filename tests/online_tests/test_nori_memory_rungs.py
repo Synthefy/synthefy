@@ -15,7 +15,7 @@ network in between. Three hand-maintained copies of the expectations would drift
 because each side keeps passing its own suite.
 
 Requires:
-    SYNTHEFY_NORI_API_KEY   a key granted the model slug below
+    SYNTHEFY_API_KEY        a key granted the model slug below
     NORI_MODEL              slug to target, default "nori-6m"
     synthefy-nori >= 0.13.0 installed (the cases ship in it) -- skipped otherwise, which is
                             also how this file behaves before that version reaches PyPI
@@ -57,8 +57,8 @@ if not _rung_cases_installed():
 from synthefy_nori.testing import rung_cases as rungs  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("SYNTHEFY_NORI_API_KEY"),
-    reason="SYNTHEFY_NORI_API_KEY is required to reach a real deployment",
+    not os.environ.get("SYNTHEFY_API_KEY"),
+    reason="SYNTHEFY_API_KEY is required to reach a real deployment",
 )
 
 
@@ -75,7 +75,7 @@ def client() -> SynthefyNoriClient:
     if direct:
         kwargs = {"base_url": direct.rsplit("/predict", 1)[0], "endpoint": "/predict"}
     with SynthefyNoriClient(
-        api_key=os.environ["SYNTHEFY_NORI_API_KEY"],
+        api_key=os.environ["SYNTHEFY_API_KEY"],
         model=os.environ.get("NORI_MODEL", "nori-6m"),
         timeout=900.0,  # a cold replica can take ~60-100s before it answers at all
         **kwargs,

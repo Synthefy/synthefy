@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [6.4.0]
 
+- Use `SYNTHEFY_API_KEY` as the canonical hosted-Nori credential while retaining
+  `SYNTHEFY_NORI_API_KEY` as a deprecated fallback.
+
 ### Added
 
 - Added `SynthefyNoriRelClient` for authenticated relational prediction jobs

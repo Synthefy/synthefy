@@ -48,9 +48,9 @@ from synthefy.api_client import (
 GATEWAY_BASE_URL = "https://inference.baseten.co"
 GATEWAY_ENDPOINT = "/predict"
 
-# Environment variable holding the hosted-Nori API key. Matches SYNTHEFY_API_KEY
-# used by SynthefyAPIClient, so the whole package reads one naming scheme.
-NORI_API_KEY_ENV = "SYNTHEFY_NORI_API_KEY"
+# Hosted Nori and forecasting share the canonical Synthefy credential.
+NORI_API_KEY_ENV = "SYNTHEFY_API_KEY"
+LEGACY_NORI_API_KEY_ENV = "SYNTHEFY_NORI_API_KEY"
 
 # Sentinel for a required ``model=`` (there is no default -- every caller names a size).
 # Explicit ``None`` is rejected too: model identity is part of every transport contract.
@@ -1069,7 +1069,7 @@ class SynthefyNoriClient:
 
     - ``"remote"`` (default): call the hosted Baseten endpoint over HTTPS.
       Requires an API key (``api_key`` argument or the
-      ``SYNTHEFY_NORI_API_KEY`` environment variable), sent as
+      ``SYNTHEFY_API_KEY`` environment variable), sent as
       ``Authorization: <auth_scheme> <key>`` (``Bearer`` by default).
     - ``"local"``: run in-process via the optional ``synthefy-nori`` package
       (``pip install "synthefy[local]"``). No network and no API key.
@@ -1091,7 +1091,7 @@ class SynthefyNoriClient:
     ----------
     api_key : str or None, optional
         API key for hosted Nori (remote mode only). If ``None``, falls back to
-        the ``SYNTHEFY_NORI_API_KEY`` environment variable. A
+        the ``SYNTHEFY_API_KEY`` environment variable. A
         :class:`ValueError` is raised if neither is set when remote mode is in
         effect.
     mode : {"remote", "local", "auto", "sagemaker"}, default "remote"
@@ -1147,7 +1147,7 @@ class SynthefyNoriClient:
     Examples
     --------
     >>> from synthefy import SynthefyNoriClient
-    >>> client = SynthefyNoriClient(api_key="...", model="nori-30m")  # or SYNTHEFY_NORI_API_KEY
+    >>> client = SynthefyNoriClient(api_key="...", model="nori-30m")  # or SYNTHEFY_API_KEY
     >>> preds = client.predict(
     ...     X_train=[[0.0, 1.0], [1.0, 0.0], [1.0, 1.0]],
     ...     y_train=[1.0, 1.0, 2.0],
@@ -1278,6 +1278,15 @@ class SynthefyNoriClient:
         elif mode == "remote":
             if api_key is None:
                 api_key = os.getenv(NORI_API_KEY_ENV)
+                if not api_key:
+                    api_key = os.getenv(LEGACY_NORI_API_KEY_ENV)
+                    if api_key:
+                        warnings.warn(
+                            f"{LEGACY_NORI_API_KEY_ENV} is deprecated; use "
+                            f"{NORI_API_KEY_ENV}",
+                            DeprecationWarning,
+                            stacklevel=2,
+                        )
             if not api_key:
                 raise ValueError(
                     "A Synthefy Nori API key must be provided either as the "
