@@ -1,4 +1,4 @@
-"""Public client for the Nori-Rel enterprise control plane."""
+"""Public client for enterprise Nori-Rel predictions."""
 
 from __future__ import annotations
 
@@ -116,8 +116,8 @@ class PredictionJob:
 class SynthefyNoriRelClient:
     """Client for enterprise relational prediction jobs.
 
-    This is a control-plane client. Database access, FastDFS, and Nori execution
-    happen in the connector agent, never inside this lightweight package.
+    Database access, FastDFS, and Nori execution happen in the connector agent,
+    never inside this lightweight package.
     """
 
     def __init__(
@@ -229,8 +229,8 @@ class SynthefyNoriRelClient:
         self,
         *,
         name: str,
-        connector: Union[ConnectorType, str],
         credential: CredentialReference,
+        connector: Union[ConnectorType, str] = ConnectorType.POSTGRESQL,
         schema_name: str = "public",
         tables: Optional[List[str]] = None,
         time_columns: Optional[dict] = None,
@@ -267,12 +267,12 @@ class SynthefyNoriRelClient:
     def submit(
         self,
         *,
-        database: Union[Database, str],
-        entity_table: str,
+        source: Union[Database, str],
+        entity: str,
         target: str,
-        event_time: str,
+        target_time: str,
         aggregation: Union[Aggregation, str],
-        horizon: str,
+        within: str,
         as_of: Optional[datetime] = None,
         relationship_path: Optional[List[str]] = None,
         entity_ids: Optional[List[Any]] = None,
@@ -280,14 +280,14 @@ class SynthefyNoriRelClient:
         quantiles: Optional[List[float]] = None,
         idempotency_key: Optional[str] = None,
     ) -> PredictionJob:
-        database_id = database.id if isinstance(database, Database) else database
+        database_id = source.id if isinstance(source, Database) else source
         request = PredictionRequest(
             database=database_id,
-            entity_table=entity_table,
+            entity_table=entity,
             target=target,
-            event_time=event_time,
+            event_time=target_time,
             aggregation=aggregation,
-            horizon=horizon,
+            horizon=within,
             as_of=as_of,
             relationship_path=relationship_path,
             entity_ids=entity_ids,
@@ -305,11 +305,37 @@ class SynthefyNoriRelClient:
     def predict(
         self,
         *,
+        source: Union[Database, str],
+        entity: str,
+        target: str,
+        target_time: str,
+        aggregation: Union[Aggregation, str],
+        within: str,
+        as_of: Optional[datetime] = None,
+        relationship_path: Optional[List[str]] = None,
+        entity_ids: Optional[List[Any]] = None,
+        output_type: Union[
+            RelationalOutputType, str
+        ] = RelationalOutputType.MEDIAN,
+        quantiles: Optional[List[float]] = None,
+        idempotency_key: Optional[str] = None,
         wait_timeout: Optional[float] = None,
         poll_interval: float = 1.0,
-        **prediction: Any,
     ) -> pd.DataFrame:
-        return self.submit(**prediction).wait(
+        return self.submit(
+            source=source,
+            entity=entity,
+            target=target,
+            target_time=target_time,
+            aggregation=aggregation,
+            within=within,
+            as_of=as_of,
+            relationship_path=relationship_path,
+            entity_ids=entity_ids,
+            output_type=output_type,
+            quantiles=quantiles,
+            idempotency_key=idempotency_key,
+        ).wait(
             timeout=wait_timeout, poll_interval=poll_interval
         )
 

@@ -699,31 +699,29 @@ temporal relational features, and calls Nori; the public client never opens a
 database connection.
 
 ```python
-from datetime import datetime, timezone
-
 from synthefy.relational import EnvironmentCredential, SynthefyNoriRelClient
 
 client = SynthefyNoriRelClient(
     base_url="https://nori-rel.example.internal",
     api_key="your-nori-rel-agent-key",
 )
-database = client.connect(
+source = client.connect(
     name="production-rds",
-    connector="postgresql",
     credential=EnvironmentCredential(variable="NORI_REL_DATABASE_URL"),
     tables=["drivers", "results"],
-    time_columns={"results": "race_date"},
 )
 predictions = client.predict(
-    database=database,
-    entity_table="drivers",
+    source=source,
+    entity="drivers",
     target="results.position",
-    event_time="results.race_date",
+    target_time="results.race_date",
     aggregation="first",
-    horizon="30 days",
-    as_of=datetime.now(timezone.utc),
+    within="30 days",
 )
 ```
+
+This predicts from the latest available snapshot. Use `as_of` only for a
+historical run, passing a timezone-aware `datetime`.
 
 Use `submit(...)` instead of `predict(...)` to receive a durable job handle
 immediately. Database credentials are always indirect references: use
@@ -738,12 +736,14 @@ for a locally managed agent secret.
   max_retries=2)` authenticates to one connector agent. Arguments fall back to
   `SYNTHEFY_NORI_REL_API_KEY` and `SYNTHEFY_NORI_REL_BASE_URL`.
 - `connect(...) -> Database` registers an indirect PostgreSQL credential and an
-  optional table allowlist/time-column map.
+  optional table allowlist/time-column map. PostgreSQL is the default connector.
 - `test_connection(database) -> ConnectionStatus` checks the registered source.
 - `discover(database) -> SchemaGraph` returns columns, primary keys, foreign
   keys, and configured time columns.
-- `submit(...) -> PredictionJob` creates a non-blocking durable job.
-- `predict(...) -> pandas.DataFrame` submits and waits for the same job.
+- `submit(source=..., entity=..., target=..., target_time=..., aggregation=...,
+  within=...) -> PredictionJob` creates a non-blocking durable job.
+- `predict(...) -> pandas.DataFrame` accepts the same prediction fields, submits,
+  and waits for the result.
 - `PredictionJob.wait()`, `refresh()`, and `cancel()` manage a submitted job.
 
 ### SynthefyNoriClient (Tabular Regression)

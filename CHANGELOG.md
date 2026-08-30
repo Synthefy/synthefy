@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against a customer-network Nori-Rel connector agent.
 - Added typed database registration, schema discovery, non-blocking `submit`,
   blocking `predict`, cancellation, and pandas result handling.
+- Added the concise prediction fields `source`, `entity`, `target_time`, and
+  `within`.
 - Added AWS Secrets Manager and environment-variable credential references. Raw
   database credentials are never accepted by the public API.
 

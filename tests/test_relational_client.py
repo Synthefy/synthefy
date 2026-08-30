@@ -75,7 +75,6 @@ def test_connect_sends_only_a_credential_reference() -> None:
     _attach_mock(client, handler)
     database = client.connect(
         name="production-rds",
-        connector="postgresql",
         credential=AwsSecret(secret_id="prod/nori-rel/postgres"),
         tables=["drivers", "results"],
         time_columns={"results": "race_date"},
@@ -85,6 +84,7 @@ def test_connect_sends_only_a_credential_reference() -> None:
     assert database.id == "db-1"
     assert captured["headers"]["authorization"] == "Bearer control-key"
     assert captured["headers"]["idempotency-key"] == "create-db-1"
+    assert captured["body"]["connector"] == "postgresql"
     assert captured["body"]["credential"] == {
         "provider": "aws_secrets_manager",
         "secret_id": "prod/nori-rel/postgres",
@@ -123,6 +123,10 @@ def test_predict_waits_for_job_and_returns_dataframe() -> None:
         requests.append((request.method, request.url.path))
         if request.method == "POST":
             body = json.loads(request.content)
+            assert body["database"] == "db-1"
+            assert body["entity_table"] == "drivers"
+            assert body["target"] == "results.position"
+            assert body["event_time"] == "results.race_date"
             assert body["horizon"] == "1 day"
             assert body["as_of"] == "2026-08-28T10:00:00Z"
             return httpx.Response(202, json=_job("pending"))
@@ -149,12 +153,12 @@ def test_predict_waits_for_job_and_returns_dataframe() -> None:
     client = SynthefyNoriRelClient("key", base_url="https://unit.test")
     _attach_mock(client, handler)
     result = client.predict(
-        database="db-1",
-        entity_table="drivers",
+        source="db-1",
+        entity="drivers",
         target="results.position",
-        event_time="results.race_date",
+        target_time="results.race_date",
         aggregation="first",
-        horizon="1 days",
+        within="1 days",
         as_of=datetime(2026, 8, 28, 10, tzinfo=timezone.utc),
         relationship_path=["drivers", "results"],
         poll_interval=0.001,
@@ -187,12 +191,12 @@ def test_wait_surfaces_failed_job_detail() -> None:
     client = SynthefyNoriRelClient("key", base_url="https://unit.test")
     _attach_mock(client, handler)
     job = client.submit(
-        database="db-1",
-        entity_table="drivers",
+        source="db-1",
+        entity="drivers",
         target="results.position",
-        event_time="results.race_date",
+        target_time="results.race_date",
         aggregation="mean",
-        horizon="30 days",
+        within="30 days",
     )
 
     with pytest.raises(PredictionFailedError, match="row limit exceeded"):
