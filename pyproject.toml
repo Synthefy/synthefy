@@ -48,6 +48,13 @@ local = ["synthefy-nori>=0.13.1"]
 # MultimodalPreprocessor + sentence-transformers to widen text into numeric SVD
 # features before the request. Needs the version that ships text_features.
 text = ["synthefy-nori[text]>=0.12.0"]
+# Local database extraction and FastDFS. FastDFS and psycopg require Python 3.10+.
+relational = [
+    "boto3>=1.34.0,<2.0.0; python_version >= '3.10'",
+    "fastdfs>=1.1,<2.0; python_version >= '3.10'",
+    "psycopg[binary]>=3.2,<4.0; python_version >= '3.10'",
+    "sqlalchemy>=2.0,<3.0; python_version >= '3.10'",
+]
 # Signed Amazon SageMaker endpoint invocation. boto3 resolves credentials from
 # its standard chain; the public client deliberately accepts no raw AWS keys.
 aws = ["boto3>=1.34.0,<2.0.0"]
@@ -77,4 +84,5 @@ dev = [
     "twine>=6.1.0",
     "pytest>=8.3.2",
     "pytest-asyncio>=0.25.0",
+    "ruff>=0.11,<1",
 ]

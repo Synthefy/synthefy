@@ -1,314 +1,157 @@
-"""Contract tests for the public Nori-Rel client."""
-
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
-from typing import Callable
+from datetime import UTC, datetime
 
-import httpx
+import pandas as pd
 import pytest
-from pydantic import ValidationError
 
-from synthefy import SynthefyNoriRelClient
 from synthefy.relational import (
     AwsSecret,
-    EnvironmentCredential,
-    PredictionFailedError,
-    PredictionRequest,
+    Database,
+    DatabaseStatus,
+    DatabaseUrl,
+    SynthefyNoriRelClient,
 )
 
-Handler = Callable[[httpx.Request], httpx.Response]
+
+class FakeRuntime:
+    def __init__(self) -> None:
+        self.connected = None
+        self.prediction = None
+        self.source = Database(
+            id="db-1",
+            name="production-rds",
+            connector="postgresql",
+            schema_name="public",
+            status=DatabaseStatus.READY,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+    def connect(self, config):
+        self.connected = config
+        return self.source
+
+    def test_connection(self, source):
+        return {"source": source}
+
+    def discover(self, source):
+        return {"source": source}
+
+    def predict(self, source, request):
+        self.prediction = (source, request)
+        return pd.DataFrame({"entity_id": [7], "prediction": [3.5]})
 
 
-def _attach_mock(client: SynthefyNoriRelClient, handler: Handler) -> None:
-    client.close()
-    client.client = httpx.Client(
-        base_url=client.base_url,
-        transport=httpx.MockTransport(handler),
+def _client(runtime: FakeRuntime | None = None) -> SynthefyNoriRelClient:
+    return SynthefyNoriRelClient(
+        api_key="hosted-model-key",
+        _runtime=runtime or FakeRuntime(),
     )
 
 
-def _job(status: str, *, error: str | None = None) -> dict:
-    return {
-        "id": "job-1",
-        "status": status,
-        "progress": 1.0 if status in {"succeeded", "failed"} else 0.25,
-        "created_at": "2026-08-28T10:00:00Z",
-        "updated_at": "2026-08-28T10:01:00Z",
-        "error": error,
-    }
+def test_client_uses_the_existing_synthefy_api_key(monkeypatch) -> None:
+    monkeypatch.delenv("SYNTHEFY_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="SYNTHEFY_API_KEY"):
+        SynthefyNoriRelClient(_runtime=FakeRuntime())
+
+    monkeypatch.setenv("SYNTHEFY_API_KEY", "environment-key")
+    client = SynthefyNoriRelClient(_runtime=FakeRuntime())
+
+    assert "environment-key" not in repr(client)
+    assert not hasattr(client, "base_url")
 
 
-def test_client_uses_relational_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SYNTHEFY_NORI_REL_API_KEY", "rel-secret")
-    monkeypatch.setenv("SYNTHEFY_NORI_REL_BASE_URL", "https://nori-rel.example.test/")
+def test_connect_keeps_the_database_endpoint_on_the_source() -> None:
+    runtime = FakeRuntime()
+    client = _client(runtime)
 
-    client = SynthefyNoriRelClient()
-
-    assert client.api_key == "rel-secret"
-    assert client.base_url == "https://nori-rel.example.test"
-    assert "rel-secret" not in repr(client)
-    client.close()
-
-
-def test_connect_sends_only_a_credential_reference() -> None:
-    captured: dict = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["headers"] = request.headers
-        captured["body"] = json.loads(request.content)
-        return httpx.Response(
-            200,
-            json={
-                "id": "db-1",
-                "name": "production-rds",
-                "connector": "postgresql",
-                "schema_name": "public",
-                "status": "pending",
-                "created_at": "2026-08-28T10:00:00Z",
-                "updated_at": "2026-08-28T10:00:00Z",
-            },
-        )
-
-    client = SynthefyNoriRelClient("control-key", base_url="https://unit.test")
-    _attach_mock(client, handler)
-    database = client.connect(
+    source = client.connect(
         name="production-rds",
-        credential=AwsSecret(secret_id="prod/nori-rel/postgres"),
-        tables=["drivers", "results"],
-        time_columns={"results": "race_date"},
-        idempotency_key="create-db-1",
+        database_url="postgresql://readonly:secret@db.internal/customer",
+        tables=["customers"],
     )
 
-    assert database.id == "db-1"
-    assert captured["headers"]["authorization"] == "Bearer control-key"
-    assert captured["headers"]["idempotency-key"] == "create-db-1"
-    assert captured["body"]["connector"] == "postgresql"
-    assert captured["body"]["credential"] == {
-        "provider": "aws_secrets_manager",
-        "secret_id": "prod/nori-rel/postgres",
-        "region_name": None,
-    }
-    assert "password" not in json.dumps(captured["body"]).lower()
-    client.close()
+    assert source is runtime.source
+    assert isinstance(runtime.connected.credential, DatabaseUrl)
+    assert "secret" not in repr(runtime.connected)
 
 
-def test_prediction_request_rejects_ambiguous_or_unsafe_contracts() -> None:
-    common = {
-        "database": "db-1",
-        "entity_table": "drivers",
-        "target": {
-            "kind": "temporal",
-            "column": "results.position",
-            "time_column": "results.race_date",
-            "operation": "next",
-            "lookahead": "30 days",
-        },
-    }
+def test_connect_accepts_an_indirect_secret_reference() -> None:
+    runtime = FakeRuntime()
+    secret = AwsSecret(secret_id="production/postgres", region_name="us-east-1")
 
-    with pytest.raises(ValidationError, match="timezone"):
-        PredictionRequest(**common, as_of=datetime(2026, 8, 28))
-    with pytest.raises(ValidationError, match="start at entity_table"):
-        PredictionRequest(**common, relationship_path=["teams", "results"])
-    with pytest.raises(ValidationError, match="quantiles must be sorted"):
-        PredictionRequest(
-            **common, output_type="quantiles", quantiles=[0.9, 0.1]
+    _client(runtime).connect(name="production-rds", credential=secret)
+
+    assert runtime.connected.credential == secret
+
+
+@pytest.mark.parametrize(
+    ("database_url", "credential"),
+    [(None, None), ("postgresql://db/name", AwsSecret(secret_id="db"))],
+)
+def test_connect_requires_one_database_credential(database_url, credential) -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        _client().connect(
+            name="production-rds",
+            database_url=database_url,
+            credential=credential,
         )
 
 
-def test_predict_waits_for_job_and_returns_dataframe() -> None:
-    requests: list[tuple[str, str]] = []
-    polls = 0
+def test_predict_builds_a_temporal_request_and_runs_locally() -> None:
+    runtime = FakeRuntime()
+    client = _client(runtime)
+    source = runtime.source
+    as_of = datetime(2026, 1, 10, tzinfo=UTC)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal polls
-        requests.append((request.method, request.url.path))
-        if request.method == "POST":
-            body = json.loads(request.content)
-            assert body["database"] == "db-1"
-            assert body["entity_table"] == "drivers"
-            assert body["task"] == "regression"
-            assert body["target"] == {
-                "kind": "temporal",
-                "column": "results.position",
-                "time_column": "results.race_date",
-                "operation": "next",
-                "lookahead": "1 day",
-            }
-            assert body["as_of"] == "2026-08-28T10:00:00Z"
-            return httpx.Response(202, json=_job("pending"))
-        if request.url.path.endswith("/result"):
-            return httpx.Response(
-                200,
-                json={
-                    "job_id": "job-1",
-                    "entity_key": "drivers.driver_id",
-                    "task": "regression",
-                    "output_type": "median",
-                    "rows": [
-                        {
-                            "entity_id": 44,
-                            "as_of": "2026-08-28T10:00:00Z",
-                            "prediction": 3.5,
-                        }
-                    ],
-                    "metadata": {"model": "nori-30m"},
-                },
-            )
-        polls += 1
-        return httpx.Response(200, json=_job("succeeded" if polls > 1 else "running"))
-
-    client = SynthefyNoriRelClient("key", base_url="https://unit.test")
-    _attach_mock(client, handler)
     result = client.predict(
-        source="db-1",
+        source=source,
         entity="drivers",
         target="results.position",
         target_time="results.race_date",
         operation="next",
-        lookahead="1 days",
-        as_of=datetime(2026, 8, 28, 10, tzinfo=timezone.utc),
-        relationship_path=["drivers", "results"],
-        poll_interval=0.001,
-    )
-
-    assert result.to_dict("records") == [
-        {
-            "entity_id": 44,
-            "as_of": datetime(2026, 8, 28, 10, tzinfo=timezone.utc),
-            "prediction": 3.5,
-            "quantiles": None,
-        }
-    ]
-    assert result.attrs["metadata"] == {"model": "nori-30m"}
-    assert requests == [
-        ("POST", "/v1/predictions"),
-        ("GET", "/v1/predictions/job-1"),
-        ("GET", "/v1/predictions/job-1"),
-        ("GET", "/v1/predictions/job-1/result"),
-    ]
-    client.close()
-
-
-def test_wait_surfaces_failed_job_detail() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST":
-            return httpx.Response(202, json=_job("pending"))
-        return httpx.Response(200, json=_job("failed", error="row limit exceeded"))
-
-    client = SynthefyNoriRelClient("key", base_url="https://unit.test")
-    _attach_mock(client, handler)
-    job = client.submit(
-        source="db-1",
-        entity="drivers",
-        target="results.position",
-        target_time="results.race_date",
-        operation="average",
         lookahead="30 days",
+        as_of=as_of,
     )
 
-    with pytest.raises(PredictionFailedError, match="row limit exceeded"):
-        job.wait(poll_interval=0.001)
-    client.close()
+    sent_source, request = runtime.prediction
+    assert sent_source is source
+    assert request.database == "db-1"
+    assert request.target.operation == "next"
+    assert request.target.lookahead == "30 days"
+    assert request.as_of == as_of
+    assert result["prediction"].tolist() == [3.5]
 
 
-def test_prediction_rejects_unknown_operation() -> None:
-    client = SynthefyNoriRelClient("key", base_url="https://unit.test")
-    with pytest.raises(ValueError, match="operation must be one of"):
-        client.submit(
-            source="db-1",
-            entity="drivers",
-            target="results.position",
-            target_time="results.race_date",
-            operation="median",  # type: ignore[arg-type]
-            lookahead="30 days",
-        )
-    client.close()
+def test_predict_supports_direct_binary_classification() -> None:
+    runtime = FakeRuntime()
 
-
-def test_direct_classification_sends_task_specific_contract() -> None:
-    captured: dict = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured.update(json.loads(request.content))
-        return httpx.Response(202, json=_job("pending"))
-
-    client = SynthefyNoriRelClient("key", base_url="https://unit.test")
-    _attach_mock(client, handler)
-    client.submit(
-        source="db-1",
+    _client(runtime).predict(
+        source=runtime.source,
         entity="customers",
         target="customers.churned",
         task="classification",
         positive_class=True,
-        decision_threshold=0.65,
-        entity_ids=[10, 11],
     )
 
-    assert captured["task"] == "classification"
-    assert captured["target"] == {
-        "kind": "direct",
-        "column": "customers.churned",
-    }
-    assert captured["positive_class"] is True
-    assert captured["decision_threshold"] == 0.65
-    assert "output_type" not in captured
-    client.close()
+    request = runtime.prediction[1]
+    assert request.target.kind == "direct"
+    assert request.task == "classification"
+    assert request.decision_threshold == 0.5
 
 
-def test_temporal_parameters_are_all_or_none() -> None:
-    client = SynthefyNoriRelClient("key", base_url="https://unit.test")
+def test_partial_temporal_target_is_rejected_before_database_access() -> None:
+    runtime = FakeRuntime()
     with pytest.raises(ValueError, match="provided together"):
-        client.submit(
-            source="db-1",
+        _client(runtime).predict(
+            source=runtime.source,
             entity="drivers",
             target="results.position",
             target_time="results.race_date",
         )
-    client.close()
+    assert runtime.prediction is None
 
 
-def test_classification_result_has_label_and_probability_columns() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "job_id": "job-1",
-                "entity_key": "customers.customer_id",
-                "task": "classification",
-                "rows": [
-                    {
-                        "entity_id": 10,
-                        "as_of": "2026-08-28T10:00:00Z",
-                        "prediction": True,
-                        "probability": 0.82,
-                    }
-                ],
-                "metadata": {"model": "nori-30m-classification"},
-            },
-        )
-
-    client = SynthefyNoriRelClient("key", base_url="https://unit.test")
-    _attach_mock(client, handler)
-
-    result = client.get_result("job-1")
-
-    assert result.columns.tolist() == [
-        "entity_id",
-        "as_of",
-        "prediction",
-        "probability",
-    ]
-    assert bool(result.iloc[0]["prediction"]) is True
-    assert result.iloc[0]["probability"] == 0.82
-    assert result.attrs["task"] == "classification"
-    client.close()
-
-
-def test_environment_credential_accepts_only_variable_names() -> None:
-    assert EnvironmentCredential(variable="NORI_REL_DATABASE_URL").variable == (
-        "NORI_REL_DATABASE_URL"
-    )
-    with pytest.raises(ValidationError):
-        EnvironmentCredential(variable="postgresql://user:password@host/database")
+def test_version_one_is_synchronous() -> None:
+    assert not hasattr(_client(), "submit")

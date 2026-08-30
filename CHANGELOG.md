@@ -12,21 +12,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added `SynthefyNoriRelClient` for authenticated relational prediction jobs
-  against a customer-network Nori-Rel service.
-- Added typed database registration, schema discovery, non-blocking `submit`,
-  blocking `predict`, cancellation, and pandas result handling.
+- Added `SynthefyNoriRelClient` for local PostgreSQL extraction and FastDFS
+  feature generation backed by hosted Nori inference.
+- Added typed database connection, schema discovery, synchronous prediction,
+  and pandas result handling.
 - Added direct and temporal relational targets. `task` selects regression or
   binary classification; temporal targets add `target_time`, `operation`, and
   `lookahead` together.
-- Added AWS Secrets Manager and environment-variable credential references. Raw
-  database credentials are never accepted by the public API.
+- Added direct database URLs plus AWS Secrets Manager and environment-variable
+  credential references. Database credentials remain in the caller's process.
 
 ### Security
 
-- Nori-Rel requires its own API key and service URL through explicit arguments or
-  `SYNTHEFY_NORI_REL_API_KEY` and `SYNTHEFY_NORI_REL_BASE_URL`. It does not reuse
-  a forecasting or model-plane credential implicitly.
+- Database snapshots and FastDFS run locally. Only model-ready feature matrices
+  are sent through the existing `SYNTHEFY_API_KEY`-authenticated Nori endpoint.
 
 ## [6.3.0]
 

@@ -11,7 +11,7 @@ enterprise relational prediction with Nori-Rel.
 ## Features
 
 - **Tabular In-Context Regression**: `SynthefyNoriClient` predicts from labeled context rows in a single forward pass — hosted on Baseten or SageMaker, or fully local, no training step
-- **Relational Prediction**: `SynthefyNoriRelClient` submits typed prediction jobs to Nori-Rel running beside a customer PostgreSQL database
+- **Relational Prediction**: `SynthefyNoriRelClient` reads a relational database locally, builds FastDFS features, and sends only those features to hosted Nori
 - **Free Prediction Intervals**: the same forward pass carries a full predictive distribution, so `output_type="quantiles"` returns calibrated bands at no extra cost
 - **Sync & Async Support**: Separate clients for synchronous and asynchronous operations
 - **Professional Error Handling**: Comprehensive exception hierarchy with detailed error messages
@@ -24,6 +24,12 @@ enterprise relational prediction with Nori-Rel.
 
 ```bash
 pip install synthefy
+```
+
+For Nori-Rel database support (Python 3.10+):
+
+```bash
+pip install "synthefy[relational]"
 ```
 
 For optional fully-local tabular inference (no API key, runs in-process), install the extra:
@@ -693,21 +699,19 @@ continuous mean is already optimal for those metrics.
 
 ## Relational prediction
 
-`SynthefyNoriRelClient` talks to Nori-Rel deployed in the customer network.
-Nori-Rel reads PostgreSQL through a read-only role, builds
-relational features, and calls the matching Nori model; the public client never opens a
-database connection.
+`SynthefyNoriRelClient` connects to PostgreSQL from the caller's process, builds
+FastDFS features locally, and sends only the flat context and query matrices to
+hosted Nori. There is no Nori-Rel server or localhost process to deploy.
 
 ```python
-from synthefy.relational import AwsSecret, SynthefyNoriRelClient
+import os
 
-client = SynthefyNoriRelClient(
-    base_url="https://nori-rel.example.internal",
-    api_key="your-nori-rel-key",
-)
+from synthefy.relational import SynthefyNoriRelClient
+
+client = SynthefyNoriRelClient(api_key="your-synthefy-key")
 source = client.connect(
     name="production-rds",
-    credential=AwsSecret(secret_id="production/nori-rel/postgres"),
+    database_url=os.environ["DATABASE_URL"],
     tables=["drivers", "results"],
 )
 predictions = client.predict(
@@ -746,29 +750,26 @@ the aggregate operations are regression-only.
 This predicts from the latest available snapshot. Use `as_of` only for a
 historical run, passing a timezone-aware `datetime`.
 
-Use `submit(...)` instead of `predict(...)` to receive a durable job handle
-immediately. Database credentials are always indirect references: use
-`AwsSecret(secret_id=...)` in production or `EnvironmentCredential(variable=...)`
-for a locally managed service secret.
+For production credentials, pass
+`AwsSecret(secret_id="production/postgres")` or
+`EnvironmentCredential(variable="DATABASE_URL")` instead of `database_url`.
+The reference is resolved locally and is never sent to Synthefy.
 
 ## API Reference
 
 ### SynthefyNoriRelClient (Relational Prediction)
 
-- `SynthefyNoriRelClient(api_key=None, *, base_url=None, timeout=30.0,
-  max_retries=2)` authenticates to one Nori-Rel service. Arguments fall back to
-  `SYNTHEFY_NORI_REL_API_KEY` and `SYNTHEFY_NORI_REL_BASE_URL`.
-- `connect(...) -> Database` registers an indirect PostgreSQL credential and an
-  optional table allowlist/time-column map. PostgreSQL is the default connector.
+- `SynthefyNoriRelClient(api_key=None, *, model="nori-30m", timeout=300.0,
+  max_retries=2)` uses hosted Nori and falls back to `SYNTHEFY_API_KEY`.
+- `connect(name=..., database_url=...) -> Database` tests and retains one local
+  PostgreSQL source. Use `credential=` instead for an environment or AWS secret.
 - `test_connection(database) -> ConnectionStatus` checks the registered source.
 - `discover(database) -> SchemaGraph` returns columns, primary keys, foreign
   keys, and configured time columns.
-- `submit(source=..., entity=..., target=..., task=...) -> PredictionJob` creates
-  a non-blocking durable job. Add `target_time`, `operation`, and `lookahead`
-  together for a temporal target.
-- `predict(...) -> pandas.DataFrame` accepts the same prediction fields, submits,
-  and waits for the result.
-- `PredictionJob.wait()`, `refresh()`, and `cancel()` manage a submitted job.
+- `predict(source=..., entity=..., target=..., task=...) -> pandas.DataFrame`
+  snapshots the source, builds FastDFS features, calls hosted Nori, and returns
+  one row per entity. Add `target_time`, `operation`, and `lookahead` together
+  for a temporal target.
 
 ### SynthefyNoriClient (Tabular Regression)
 
@@ -881,8 +882,6 @@ Each status error includes:
 
 - `SYNTHEFY_API_KEY`: Your Synthefy API key (forecasting and hosted Nori)
 - `SYNTHEFY_NORI_API_KEY`: Deprecated hosted-Nori alias
-- `SYNTHEFY_NORI_REL_API_KEY`: Nori-Rel API key (`SynthefyNoriRelClient`)
-- `SYNTHEFY_NORI_REL_BASE_URL`: Private Nori-Rel URL
 
 ## Support
 

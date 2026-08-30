@@ -1,17 +1,22 @@
-"""Wire models for the Nori-Rel enterprise control plane."""
+"""Typed configuration models for Nori-Rel."""
 
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-_QUALIFIED_COLUMN = re.compile(
-    r"^[A-Za-z_][A-Za-z0-9_$]*\.[A-Za-z_][A-Za-z0-9_$]*$"
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
 )
+
+_QUALIFIED_COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*\.[A-Za-z_][A-Za-z0-9_$]*$")
 _DURATION = re.compile(
     r"^(?P<value>[1-9][0-9]*)\s+"
     r"(?P<unit>second|seconds|minute|minutes|hour|hours|day|days|week|weeks)$",
@@ -21,8 +26,8 @@ _ENVIRONMENT_VARIABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
 
 
-class WireModel(BaseModel):
-    """Strict base model shared by every Nori-Rel wire object."""
+class StrictModel(BaseModel):
+    """Reject unknown configuration fields."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -35,14 +40,6 @@ class DatabaseStatus(str, Enum):
     PENDING = "pending"
     READY = "ready"
     ERROR = "error"
-
-
-class PredictionStatus(str, Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
 
 
 class PredictionTask(str, Enum):
@@ -65,7 +62,7 @@ class RelationalOutputType(str, Enum):
     QUANTILES = "quantiles"
 
 
-class DirectTarget(WireModel):
+class DirectTarget(StrictModel):
     kind: Literal["direct"] = "direct"
     column: str
 
@@ -78,7 +75,7 @@ class DirectTarget(WireModel):
         return value
 
 
-class TemporalTarget(WireModel):
+class TemporalTarget(StrictModel):
     kind: Literal["temporal"] = "temporal"
     column: str
     time_column: str
@@ -111,17 +108,30 @@ class TemporalTarget(WireModel):
         return f"{amount} {unit}"
 
     @model_validator(mode="after")
-    def matching_tables(self) -> "TemporalTarget":
+    def matching_tables(self) -> TemporalTarget:
         if self.column.split(".", 1)[0] != self.time_column.split(".", 1)[0]:
             raise ValueError("column and time_column must belong to the same table")
         return self
+
+    def lookahead_delta(self) -> timedelta:
+        amount_text, unit = self.lookahead.split()
+        amount = int(amount_text)
+        if unit.startswith("second"):
+            return timedelta(seconds=amount)
+        if unit.startswith("minute"):
+            return timedelta(minutes=amount)
+        if unit.startswith("hour"):
+            return timedelta(hours=amount)
+        if unit.startswith("day"):
+            return timedelta(days=amount)
+        return timedelta(weeks=amount)
 
 
 TargetDefinition = Union[DirectTarget, TemporalTarget]
 
 
 class AwsSecret(BaseModel):
-    """Reference to a secret resolved by the Nori-Rel service's AWS identity."""
+    """Reference to a database URL or RDS credential JSON in Secrets Manager."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -131,7 +141,7 @@ class AwsSecret(BaseModel):
 
 
 class EnvironmentCredential(BaseModel):
-    """Reference to a connection URL stored in the Nori-Rel service environment."""
+    """Reference to a database URL stored in the caller's environment."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -146,10 +156,19 @@ class EnvironmentCredential(BaseModel):
         return value
 
 
-CredentialReference = Union[AwsSecret, EnvironmentCredential]
+class DatabaseUrl(BaseModel):
+    """A database URL retained only in memory by the local client."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider: Literal["url"] = "url"
+    value: SecretStr
 
 
-class DatabaseCreateRequest(WireModel):
+CredentialReference = Union[AwsSecret, EnvironmentCredential, DatabaseUrl]
+
+
+class DatabaseCreateRequest(StrictModel):
     name: str = Field(min_length=1, max_length=128)
     connector: ConnectorType
     credential: CredentialReference
@@ -188,7 +207,7 @@ class DatabaseCreateRequest(WireModel):
         return value
 
     @model_validator(mode="after")
-    def validate_table_configuration(self) -> "DatabaseCreateRequest":
+    def validate_table_configuration(self) -> DatabaseCreateRequest:
         if self.tables is not None:
             unknown = set(self.time_columns).difference(self.tables)
             if unknown:
@@ -196,7 +215,7 @@ class DatabaseCreateRequest(WireModel):
         return self
 
 
-class Database(WireModel):
+class Database(StrictModel):
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     connector: ConnectorType
@@ -207,33 +226,33 @@ class Database(WireModel):
     error: Optional[str] = None
 
 
-class ConnectionStatus(WireModel):
+class ConnectionStatus(StrictModel):
     database_id: str
     status: DatabaseStatus
     latency_ms: Optional[float] = Field(default=None, ge=0)
     error: Optional[str] = None
 
 
-class ColumnSchema(WireModel):
+class ColumnSchema(StrictModel):
     name: str
     data_type: str
     nullable: bool
 
 
-class ForeignKeySchema(WireModel):
+class ForeignKeySchema(StrictModel):
     name: Optional[str] = None
     columns: List[str] = Field(min_length=1)
     referred_table: str
     referred_columns: List[str] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def matching_arity(self) -> "ForeignKeySchema":
+    def matching_arity(self) -> ForeignKeySchema:
         if len(self.columns) != len(self.referred_columns):
             raise ValueError("foreign-key columns must have matching arity")
         return self
 
 
-class TableSchema(WireModel):
+class TableSchema(StrictModel):
     name: str
     columns: List[ColumnSchema]
     primary_key: List[str] = Field(default_factory=list)
@@ -241,21 +260,21 @@ class TableSchema(WireModel):
     time_column: Optional[str] = None
 
 
-class ConnectorCapabilities(WireModel):
-    consistent_snapshot: bool
-    schemas: bool
-    server_side_cursor: bool
+class ConnectorCapabilities(StrictModel):
+    consistent_snapshot: bool = True
+    schemas: bool = True
+    server_side_cursor: bool = True
 
 
-class SchemaGraph(WireModel):
+class SchemaGraph(StrictModel):
     database_id: str
     schema_name: str
     tables: List[TableSchema]
-    capabilities: ConnectorCapabilities
+    capabilities: ConnectorCapabilities = Field(default_factory=ConnectorCapabilities)
     discovered_at: datetime
 
 
-class PredictionRequest(WireModel):
+class PredictionRequest(StrictModel):
     database: str = Field(min_length=1)
     entity_table: str = Field(min_length=1)
     task: PredictionTask = PredictionTask.REGRESSION
@@ -291,15 +310,13 @@ class PredictionRequest(WireModel):
         return value
 
     @model_validator(mode="after")
-    def validate_prediction(self) -> "PredictionRequest":
+    def validate_prediction(self) -> PredictionRequest:
         target_table, _ = self.target.column.split(".", 1)
         if isinstance(self.target, DirectTarget) and target_table != self.entity_table:
-            raise ValueError(
-                "a direct target must belong to entity_table"
-            )
-        if (
-            isinstance(self.target, DirectTarget)
-            and self.relationship_path not in (None, [self.entity_table])
+            raise ValueError("a direct target must belong to entity_table")
+        if isinstance(self.target, DirectTarget) and self.relationship_path not in (
+            None,
+            [self.entity_table],
         ):
             raise ValueError("a direct target does not need relationship_path")
         if (
@@ -341,51 +358,4 @@ class PredictionRequest(WireModel):
                 raise ValueError("quantiles must not contain duplicates")
             if self.quantiles != sorted(self.quantiles):
                 raise ValueError("quantiles must be sorted")
-        return self
-
-
-class PredictionJobRecord(WireModel):
-    id: str
-    status: PredictionStatus
-    progress: float = Field(ge=0, le=1)
-    created_at: datetime
-    updated_at: datetime
-    error: Optional[str] = None
-
-
-class PredictionRow(WireModel):
-    entity_id: Any
-    as_of: datetime
-    prediction: Any
-    probability: Optional[float] = Field(default=None, ge=0, le=1)
-    quantiles: Optional[List[Optional[float]]] = None
-
-
-class PredictionResult(WireModel):
-    job_id: str
-    entity_key: str
-    task: PredictionTask
-    output_type: Optional[RelationalOutputType] = None
-    rows: List[PredictionRow]
-    taus: Optional[List[float]] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def validate_rows(self) -> "PredictionResult":
-        if self.task == PredictionTask.REGRESSION:
-            if self.output_type is None:
-                raise ValueError("regression results require output_type")
-            if any(row.probability is not None for row in self.rows):
-                raise ValueError("regression results cannot contain probabilities")
-        else:
-            if self.output_type is not None or self.taus is not None:
-                raise ValueError(
-                    "classification results cannot contain regression output"
-                )
-            if any(row.quantiles is not None for row in self.rows):
-                raise ValueError("classification results cannot contain quantiles")
-            if any(row.probability is None for row in self.rows):
-                raise ValueError("classification results require probabilities")
-            if any(row.prediction is None for row in self.rows):
-                raise ValueError("classification results require predicted labels")
         return self
