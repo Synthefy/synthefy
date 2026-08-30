@@ -11,7 +11,7 @@ enterprise relational prediction with Nori-Rel.
 ## Features
 
 - **Tabular In-Context Regression**: `SynthefyNoriClient` predicts from labeled context rows in a single forward pass — hosted on Baseten or SageMaker, or fully local, no training step
-- **Relational Prediction**: `SynthefyNoriRelClient` submits typed prediction jobs to a connector agent running beside a customer PostgreSQL database
+- **Relational Prediction**: `SynthefyNoriRelClient` submits typed prediction jobs to Nori-Rel running beside a customer PostgreSQL database
 - **Free Prediction Intervals**: the same forward pass carries a full predictive distribution, so `output_type="quantiles"` returns calibrated bands at no extra cost
 - **Sync & Async Support**: Separate clients for synchronous and asynchronous operations
 - **Professional Error Handling**: Comprehensive exception hierarchy with detailed error messages
@@ -693,8 +693,8 @@ continuous mean is already optimal for those metrics.
 
 ## Relational prediction
 
-`SynthefyNoriRelClient` talks to the Nori-Rel connector agent deployed in the
-customer network. The agent reads PostgreSQL through a read-only role, builds
+`SynthefyNoriRelClient` talks to Nori-Rel deployed in the customer network.
+Nori-Rel reads PostgreSQL through a read-only role, builds
 relational features, and calls the matching Nori model; the public client never opens a
 database connection.
 
@@ -703,7 +703,7 @@ from synthefy.relational import AwsSecret, SynthefyNoriRelClient
 
 client = SynthefyNoriRelClient(
     base_url="https://nori-rel.example.internal",
-    api_key="your-nori-rel-agent-key",
+    api_key="your-nori-rel-key",
 )
 source = client.connect(
     name="production-rds",
@@ -749,14 +749,14 @@ historical run, passing a timezone-aware `datetime`.
 Use `submit(...)` instead of `predict(...)` to receive a durable job handle
 immediately. Database credentials are always indirect references: use
 `AwsSecret(secret_id=...)` in production or `EnvironmentCredential(variable=...)`
-for a locally managed agent secret.
+for a locally managed service secret.
 
 ## API Reference
 
 ### SynthefyNoriRelClient (Relational Prediction)
 
 - `SynthefyNoriRelClient(api_key=None, *, base_url=None, timeout=30.0,
-  max_retries=2)` authenticates to one connector agent. Arguments fall back to
+  max_retries=2)` authenticates to one Nori-Rel service. Arguments fall back to
   `SYNTHEFY_NORI_REL_API_KEY` and `SYNTHEFY_NORI_REL_BASE_URL`.
 - `connect(...) -> Database` registers an indirect PostgreSQL credential and an
   optional table allowlist/time-column map. PostgreSQL is the default connector.
@@ -881,8 +881,8 @@ Each status error includes:
 
 - `SYNTHEFY_API_KEY`: Your Synthefy API key (forecasting and hosted Nori)
 - `SYNTHEFY_NORI_API_KEY`: Deprecated hosted-Nori alias
-- `SYNTHEFY_NORI_REL_API_KEY`: Connector-agent API key (`SynthefyNoriRelClient`)
-- `SYNTHEFY_NORI_REL_BASE_URL`: Private connector-agent URL
+- `SYNTHEFY_NORI_REL_API_KEY`: Nori-Rel API key (`SynthefyNoriRelClient`)
+- `SYNTHEFY_NORI_REL_BASE_URL`: Private Nori-Rel URL
 
 ## Support
 

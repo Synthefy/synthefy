@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Added `SynthefyNoriRelClient` for authenticated relational prediction jobs
-  against a customer-network Nori-Rel connector agent.
+  against a customer-network Nori-Rel service.
 - Added typed database registration, schema discovery, non-blocking `submit`,
   blocking `predict`, cancellation, and pandas result handling.
 - Added direct and temporal relational targets. `task` selects regression or
@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Nori-Rel requires its own API key and agent URL through explicit arguments or
+- Nori-Rel requires its own API key and service URL through explicit arguments or
   `SYNTHEFY_NORI_REL_API_KEY` and `SYNTHEFY_NORI_REL_BASE_URL`. It does not reuse
   a forecasting or model-plane credential implicitly.
 

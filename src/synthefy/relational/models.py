@@ -121,7 +121,7 @@ TargetDefinition = Union[DirectTarget, TemporalTarget]
 
 
 class AwsSecret(BaseModel):
-    """Reference to a secret resolved by the connector agent's AWS identity."""
+    """Reference to a secret resolved by the Nori-Rel service's AWS identity."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -131,7 +131,7 @@ class AwsSecret(BaseModel):
 
 
 class EnvironmentCredential(BaseModel):
-    """Reference to a connection URL stored in the connector agent environment."""
+    """Reference to a connection URL stored in the Nori-Rel service environment."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 

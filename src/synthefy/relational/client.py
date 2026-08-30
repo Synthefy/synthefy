@@ -126,7 +126,7 @@ class PredictionJob:
 class SynthefyNoriRelClient:
     """Client for enterprise relational prediction jobs.
 
-    Database access, FastDFS, and Nori execution happen in the connector agent,
+    Database access, FastDFS, and Nori execution happen in the Nori-Rel service,
     never inside this lightweight package.
     """
 
@@ -142,7 +142,7 @@ class SynthefyNoriRelClient:
         base_url = base_url or os.getenv(NORI_REL_BASE_URL_ENV)
         if not base_url or not base_url.strip():
             raise ValueError(
-                "A Nori-Rel agent URL is required through base_url or "
+                "A Nori-Rel URL is required through base_url or "
                 f"{NORI_REL_BASE_URL_ENV}"
             )
         if timeout <= 0:

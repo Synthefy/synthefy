@@ -42,12 +42,12 @@ def _job(status: str, *, error: str | None = None) -> dict:
 
 def test_client_uses_relational_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SYNTHEFY_NORI_REL_API_KEY", "rel-secret")
-    monkeypatch.setenv("SYNTHEFY_NORI_REL_BASE_URL", "https://agent.example.test/")
+    monkeypatch.setenv("SYNTHEFY_NORI_REL_BASE_URL", "https://nori-rel.example.test/")
 
     client = SynthefyNoriRelClient()
 
     assert client.api_key == "rel-secret"
-    assert client.base_url == "https://agent.example.test"
+    assert client.base_url == "https://nori-rel.example.test"
     assert "rel-secret" not in repr(client)
     client.close()
 
