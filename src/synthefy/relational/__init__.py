@@ -3,6 +3,7 @@
 from synthefy.relational.client import (
     PredictionFailedError,
     PredictionJob,
+    PredictionOperation,
     SynthefyNoriRelClient,
 )
 from synthefy.relational.models import (
@@ -39,6 +40,7 @@ __all__ = [
     "EnvironmentCredential",
     "PredictionFailedError",
     "PredictionJob",
+    "PredictionOperation",
     "PredictionJobRecord",
     "PredictionRequest",
     "PredictionResult",

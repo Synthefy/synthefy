@@ -715,10 +715,14 @@ predictions = client.predict(
     entity="drivers",
     target="results.position",
     target_time="results.race_date",
-    aggregation="first",
-    within="30 days",
+    operation="next",
+    lookahead="30 days",
 )
 ```
+
+`operation="next"` predicts the first target event after the snapshot time.
+Use `average`, `total`, `minimum`, `maximum`, or `count` to summarize every
+target event in the lookahead window.
 
 This predicts from the latest available snapshot. Use `as_of` only for a
 historical run, passing a timezone-aware `datetime`.
@@ -740,8 +744,8 @@ for a locally managed agent secret.
 - `test_connection(database) -> ConnectionStatus` checks the registered source.
 - `discover(database) -> SchemaGraph` returns columns, primary keys, foreign
   keys, and configured time columns.
-- `submit(source=..., entity=..., target=..., target_time=..., aggregation=...,
-  within=...) -> PredictionJob` creates a non-blocking durable job.
+- `submit(source=..., entity=..., target=..., target_time=..., operation=...,
+  lookahead=...) -> PredictionJob` creates a non-blocking durable job.
 - `predict(...) -> pandas.DataFrame` accepts the same prediction fields, submits,
   and waits for the result.
 - `PredictionJob.wait()`, `refresh()`, and `cancel()` manage a submitted job.

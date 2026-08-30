@@ -127,6 +127,7 @@ def test_predict_waits_for_job_and_returns_dataframe() -> None:
             assert body["entity_table"] == "drivers"
             assert body["target"] == "results.position"
             assert body["event_time"] == "results.race_date"
+            assert body["aggregation"] == "first"
             assert body["horizon"] == "1 day"
             assert body["as_of"] == "2026-08-28T10:00:00Z"
             return httpx.Response(202, json=_job("pending"))
@@ -157,8 +158,8 @@ def test_predict_waits_for_job_and_returns_dataframe() -> None:
         entity="drivers",
         target="results.position",
         target_time="results.race_date",
-        aggregation="first",
-        within="1 days",
+        operation="next",
+        lookahead="1 days",
         as_of=datetime(2026, 8, 28, 10, tzinfo=timezone.utc),
         relationship_path=["drivers", "results"],
         poll_interval=0.001,
@@ -195,12 +196,26 @@ def test_wait_surfaces_failed_job_detail() -> None:
         entity="drivers",
         target="results.position",
         target_time="results.race_date",
-        aggregation="mean",
-        within="30 days",
+        operation="average",
+        lookahead="30 days",
     )
 
     with pytest.raises(PredictionFailedError, match="row limit exceeded"):
         job.wait(poll_interval=0.001)
+    client.close()
+
+
+def test_prediction_rejects_unknown_operation() -> None:
+    client = SynthefyNoriRelClient("key", base_url="https://unit.test")
+    with pytest.raises(ValueError, match="operation must be one of"):
+        client.submit(
+            source="db-1",
+            entity="drivers",
+            target="results.position",
+            target_time="results.race_date",
+            operation="median",  # type: ignore[arg-type]
+            lookahead="30 days",
+        )
     client.close()
 
 

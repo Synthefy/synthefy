@@ -6,7 +6,7 @@ import os
 import time
 import uuid
 from datetime import datetime
-from typing import Any, List, Optional, Union
+from typing import Any, List, Literal, Optional, Union
 from urllib.parse import quote
 
 import httpx
@@ -42,6 +42,17 @@ _TERMINAL_STATUSES = frozenset(
         PredictionStatus.CANCELLED,
     }
 )
+PredictionOperation = Literal[
+    "next", "average", "total", "minimum", "maximum", "count"
+]
+_OPERATION_AGGREGATIONS = {
+    "next": Aggregation.FIRST,
+    "average": Aggregation.MEAN,
+    "total": Aggregation.SUM,
+    "minimum": Aggregation.MIN,
+    "maximum": Aggregation.MAX,
+    "count": Aggregation.COUNT,
+}
 
 
 class PredictionFailedError(RuntimeError):
@@ -225,6 +236,14 @@ class SynthefyNoriRelClient:
             raise ValueError("resource id must not be blank")
         return quote(value, safe="")
 
+    @staticmethod
+    def _resolve_operation(operation: PredictionOperation) -> Aggregation:
+        try:
+            return _OPERATION_AGGREGATIONS[operation]
+        except KeyError as exc:
+            choices = ", ".join(_OPERATION_AGGREGATIONS)
+            raise ValueError(f"operation must be one of: {choices}") from exc
+
     def connect(
         self,
         *,
@@ -271,8 +290,8 @@ class SynthefyNoriRelClient:
         entity: str,
         target: str,
         target_time: str,
-        aggregation: Union[Aggregation, str],
-        within: str,
+        operation: PredictionOperation,
+        lookahead: str,
         as_of: Optional[datetime] = None,
         relationship_path: Optional[List[str]] = None,
         entity_ids: Optional[List[Any]] = None,
@@ -286,8 +305,8 @@ class SynthefyNoriRelClient:
             entity_table=entity,
             target=target,
             event_time=target_time,
-            aggregation=aggregation,
-            horizon=within,
+            aggregation=self._resolve_operation(operation),
+            horizon=lookahead,
             as_of=as_of,
             relationship_path=relationship_path,
             entity_ids=entity_ids,
@@ -309,8 +328,8 @@ class SynthefyNoriRelClient:
         entity: str,
         target: str,
         target_time: str,
-        aggregation: Union[Aggregation, str],
-        within: str,
+        operation: PredictionOperation,
+        lookahead: str,
         as_of: Optional[datetime] = None,
         relationship_path: Optional[List[str]] = None,
         entity_ids: Optional[List[Any]] = None,
@@ -327,8 +346,8 @@ class SynthefyNoriRelClient:
             entity=entity,
             target=target,
             target_time=target_time,
-            aggregation=aggregation,
-            within=within,
+            operation=operation,
+            lookahead=lookahead,
             as_of=as_of,
             relationship_path=relationship_path,
             entity_ids=entity_ids,
