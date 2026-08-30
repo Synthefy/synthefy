@@ -699,7 +699,7 @@ temporal relational features, and calls Nori; the public client never opens a
 database connection.
 
 ```python
-from synthefy.relational import EnvironmentCredential, SynthefyNoriRelClient
+from synthefy.relational import AwsSecret, SynthefyNoriRelClient
 
 client = SynthefyNoriRelClient(
     base_url="https://nori-rel.example.internal",
@@ -707,7 +707,7 @@ client = SynthefyNoriRelClient(
 )
 source = client.connect(
     name="production-rds",
-    credential=EnvironmentCredential(variable="NORI_REL_DATABASE_URL"),
+    credential=AwsSecret(secret_id="production/nori-rel/postgres"),
     tables=["drivers", "results"],
 )
 predictions = client.predict(
