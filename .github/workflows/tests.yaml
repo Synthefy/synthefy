@@ -33,6 +33,11 @@ jobs:
         run: |
           uv run pytest tests/ --ignore=tests/online_tests -v --tb=short
 
+      - name: Build and validate distributions
+        run: |
+          uv build
+          uv run twine check dist/*
+
       - name: Run online API tests
         env:
           SYNTHEFY_API_KEY: ${{ secrets.SYNTHEFY_API_KEY }}
